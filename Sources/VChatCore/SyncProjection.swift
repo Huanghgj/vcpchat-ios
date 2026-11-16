@@ -38,11 +38,16 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
                 a.contextTokenLimit = Self.contextInteger(d["contextTokenLimit"]); a.maxOutputTokens = Self.contextInteger(d["maxOutputTokens"])
                 a.createdAt = ((try? SyncWire.time(d["createdAt"])) ?? e.updatedAt)/1000; if let avatar { a.avatarUrl = avatar["image"].text }; out.agents.append(a)
             } else if identity.entityType == "owner" {
-                var g = extras.groups.first { $0.id == id } ?? VCPGroup(id: id)
+                let existing = extras.groups.first { $0.id == id }
+                var g = existing ?? VCPGroup(id: id)
                 g.name = d["name"].text.isEmpty ? "未命名群组" : d["name"].text; g.memberIds = d["members"].array.compactMap { agents[$0.text] }
                 g.mode = d["mode"].text == "sequential" ? .all : d["mode"].text == "random" ? .random : .inviteOnly
                 g.systemPrompt = d["groupPrompt"].text; g.unifiedModel = d["useUnifiedModel"].bool == true ? d["unifiedModel"].text : ""
-                g.enableContextMessageWindow = d["enableContextMessageWindow"].bool; g.contextMessageWindowSize = Self.contextInteger(d["contextMessageWindowSize"])
+                // Wire 1.6 leaves each end's history window in its local settings.
+                if existing == nil {
+                    g.enableContextMessageWindow = d["enableContextMessageWindow"].bool
+                    g.contextMessageWindowSize = Self.contextInteger(d["contextMessageWindowSize"])
+                }
                 g.createdAt = ((try? SyncWire.time(d["createdAt"])) ?? e.updatedAt)/1000; if let avatar { g.avatarUrl = avatar["image"].text }; out.groups.append(g)
             } else {
                 guard let owner = entities[identity.owner.key],owner.deletedAt == nil else { continue }
@@ -78,6 +83,16 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
             e.contentHash = SyncWire.aggregate(entities.values.filter { $0.identity.entityType == "topic" && $0.identity.owner == e.identity && $0.deletedAt == nil }.map { SyncWire.hash(.object(["topicId":.string($0.identity.topicId!),"configHash":.string($0.configHash),"contentHash":.string($0.contentHash)])) }); entities[key] = e
         }
     }
+    mutating func adaptGroupDTOsToWire16() {
+        for (key,var e) in entities where e.identity.entityType == "owner" && e.identity.ownerType == "group" {
+            var data = e.data.object
+            data.removeValue(forKey: "enableContextMessageWindow")
+            data.removeValue(forKey: "contextMessageWindowSize")
+            e.data = .object(data)
+            e.configHash = SyncWire.dtoHash(e.data,identity: e.identity)
+            entities[key] = e
+        }
+    }
     public mutating func overlay(_ local: SyncSnapshot,versions: [String:Double] = [:],now: Double = SyncWire.now) throws {
         let baseline = toLocal(), owners = Dictionary(uniqueKeysWithValues: entities.values.filter { $0.identity.entityType == "owner" }.map { (entityID($0),$0) })
         let baselineMessages = Dictionary(uniqueKeysWithValues: baseline.messages.map { ($0.id,$0) })
@@ -98,8 +113,6 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
             } else {
                 kind = "group"; guard let g = local.groups.first(where: { $0.id == id }) else { e.deletedAt = now; entities[key] = e; continue }
                 let b = baseline.groups.first { $0.id == id }; next["name"] = .string(g.name)
-                if g.enableContextMessageWindow != b?.enableContextMessageWindow { next["enableContextMessageWindow"] = g.enableContextMessageWindow.map(JSONValue.bool) ?? .null }
-                if g.contextMessageWindowSize != b?.contextMessageWindowSize { next["contextMessageWindowSize"] = g.contextMessageWindowSize.map { .number(Double($0)) } ?? .null }
                 if g.memberIds != b?.memberIds { next["members"] = .array(try g.memberIds.map { guard let remote = remoteAgents[$0] else { throw SyncWire.fail("群组含未加入此同步来源的成员，请先在桌面加入") }; return .string(remote) }) }
                 if g.mode != b?.mode { guard g.mode != .rotate,g.mode != .mention else { throw SyncWire.fail("此群组模式不能写回桌面，请选依次、随机或仅点名") }; next["mode"] = .string(g.mode == .all ? "sequential" : g.mode.rawValue) }
                 if g.systemPrompt != b?.systemPrompt { next["groupPrompt"] = .string(g.systemPrompt) }
@@ -115,13 +128,20 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
             if identity.ownerType == "agent" { data["locked"] = .bool(t.locked ?? false); data["unread"] = .bool(t.unread ?? false) }
             var e = SyncEntity(identity: identity,data: .object(data),updatedAt: now); e.localId = t.id; entities[identity.key] = e
         }
+        let byTopic = Dictionary(grouping: local.messages,by: \.topicID)
         for e in entities.values where e.identity.entityType == "topic" && e.deletedAt == nil {
-            let key = e.identity.topicKey,previous = messages[key] ?? [],rows = local.messages.filter { $0.topicID == entityID(e) }; var next: [JSONValue] = []
+            let key = e.identity.topicKey,previous = messages[key] ?? [],rows = byTopic[entityID(e)] ?? []
+            let previousByLocalID = Dictionary(uniqueKeysWithValues: previous.map { m in
+                let id = m["localId"].text
+                return (id.isEmpty ? localID("message",m["id"].text,owner: key) : id,m)
+            })
+            let surviving = Set(rows.map(\.id))
+            var next: [JSONValue] = []
             for r in rows {
                 // Pending user input is saved history awaiting chat delivery,
                 // not an active generation. Sync must not acknowledge or resend it.
                 guard !["connecting","streaming"].contains(r.status), r.status != "pending" || r.role == "user" else { throw SyncWire.fail("请等待正在生成的回复结束后同步") }
-                let old = previous.first { ($0["localId"].text.isEmpty ? localID("message",$0["id"].text,owner: key) : $0["localId"].text) == r.id }, before = baselineMessages[r.id]
+                let old = previousByLocalID[r.id],before = baselineMessages[r.id]
                 if let old,let before,r.content == before.content,r.reasoning == before.reasoning,r.authorName == before.authorName,r.attachments.map(\.hash) == before.attachments.map(\.hash) { next.append(old); continue }
                 var raw = old?.object ?? [:]; raw["id"] = old?["id"] ?? .string(r.id); raw["role"] = .string(r.originalRole ?? r.role); raw["content"] = .string(r.reasoning.isEmpty ? r.content : "<think>\(r.reasoning)</think>\n\(r.content)"); raw["timestamp"] = .number(SyncWire.milliseconds(r.createdAt)); raw["topicId"] = .string(e.identity.topicId!)
                 if !r.authorName.isEmpty { raw["name"] = .string(r.authorName) }; if let agent = remoteAgents[r.agentID] { raw["agentId"] = .string(agent) }
@@ -132,7 +152,7 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
                 var warnings = 0; var m = try SyncWire.message(.object(raw),topic: e.identity.topicId!,warnings: &warnings).object
                 guard warnings == 0 else { throw SyncWire.fail("新附件身份无效，未写回") }; m["updatedAt"] = .number(versions["message\0" + r.id] ?? now); m["localId"] = .string(r.id); m["contentHash"] = .string(SyncWire.fingerprint(.object(m))); next.append(.object(m))
             }
-            for m in previous where !rows.contains(where: { $0.id == (m["localId"].text.isEmpty ? localID("message",m["id"].text,owner: key) : m["localId"].text) }) { messageDeletes[key,default: [:]][m["id"].text] = now }
+            for (id,m) in previousByLocalID where !surviving.contains(id) { messageDeletes[key,default: [:]][m["id"].text] = now }
             // Restoring a message revives it rather than also advertising its tombstone.
             for m in next { messageDeletes[key]?.removeValue(forKey: m["id"].text) }
             if !next.isEmpty || messages[key] != nil { messages[key] = next }
