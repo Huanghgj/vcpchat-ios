@@ -2,6 +2,10 @@ import SwiftUI
 import WebKit
 import Observation
 
+public enum IslandSection: Sendable, Equatable {
+    case markdown(String)
+    case island(String)
+}
 public enum HTMLIslandPolicy {
     public static let root = "<div id=\"vcp-root\">"
     public static func accepts(_ source: String) -> Bool {
@@ -42,6 +46,139 @@ public enum HTMLIslandPolicy {
         }
         return false
     }
+    public static func containsIsland(_ source: String) -> Bool {
+        guard source.contains("vcp-root") else { return false }
+        let sections = extractSections(from: source)
+        return sections.contains { if case .island = $0 { return true }; return false }
+    }
+
+    /// Extract mixed markdown and embedded HTML visual islands from prose.
+    public static func extractSections(from source: String) -> [IslandSection] {
+        guard source.contains("vcp-root") else { return [.markdown(source)] }
+        let s = source as NSString
+        let fences = codeFences(source)
+        let rootPattern = #"(?i)<div\b(?:"[^"]*"|'[^']*'|[^'">])*?\bid\s*=\s*(?:"vcp-root"|'vcp-root'|vcp-root)(?=[\s>])(?:"[^"]*"|'[^']*'|[^'">])*?>"#
+        guard let rootRegex = try? NSRegularExpression(pattern: rootPattern) else { return [.markdown(source)] }
+        let matches = rootRegex.matches(in: source, range: NSRange(location: 0, length: s.length))
+        guard !matches.isEmpty else { return [.markdown(source)] }
+
+        var sections: [IslandSection] = []
+        var cursor = 0
+
+
+        // The old single-root renderer passed the whole fragment to WebKit,
+        // including any closing scripts or styles after the root.
+        if matches.count == 1, accepts(source) { return [.island(source)] }
+
+        for m in matches {
+            let divStart = m.range.location
+            if divStart < cursor { continue }
+            // Skip root divs inside code fences
+            if fences.contains(where: { NSLocationInRange(divStart, $0) }) { continue }
+            guard accepts(s.substring(with: m.range)) else { continue }
+
+            // Pull in preceding <style>...</style> if tightly attached
+            let islandStart = findStylePrefix(in: s, after: cursor, before: divStart)
+
+            // Balance <div> depth starting from after this root div opening tag
+            let divOpenEnd = NSMaxRange(m.range)
+            let divEnd = balanceDiv(in: s, from: divOpenEnd)
+            let islandEnd = attachedScriptsEnd(in: s, from: divEnd)
+
+            let preceding = s.substring(with: NSRange(location: cursor, length: islandStart - cursor))
+            if !preceding.isEmpty {
+                sections.append(.markdown(preceding))
+            }
+
+            let islandHtml = s.substring(with: NSRange(location: islandStart, length: islandEnd - islandStart))
+            sections.append(.island(islandHtml))
+            cursor = islandEnd
+        }
+
+        if cursor < s.length {
+            let trailing = s.substring(from: cursor)
+            if !trailing.isEmpty {
+                sections.append(.markdown(trailing))
+            }
+        }
+        return sections.isEmpty ? [.markdown(source)] : sections
+    }
+
+    private static func codeFences(_ source: String) -> [NSRange] {
+        var ranges: [NSRange] = []; var opened: (Int, String, Int)?; var offset = 0
+        let s = source as NSString
+        for raw in source.components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+            if let (start, marker, count) = opened {
+                if let m = matchPattern("^ {0,3}(`+|~+)[ \\t]*$", line), m.count > 1, m[1].hasPrefix(marker), m[1].count >= count {
+                    ranges.append(NSRange(location: start, length: min(s.length, offset + raw.utf16.count + 1) - start))
+                    opened = nil
+                }
+            } else if let m = matchPattern("^ {0,3}(`{3,}|~{3,})(.*)$", line), m.count > 2, !(m[1].hasPrefix("`") && m[2].contains("`")) {
+                opened = (offset, String(m[1].prefix(1)), m[1].count)
+            }
+            offset += raw.utf16.count + 1
+        }
+        if let (start, _, _) = opened { ranges.append(NSRange(location: start, length: s.length - start)) }
+        return ranges
+    }
+
+    private static func matchPattern(_ pattern: String, _ text: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) else { return nil }
+        let s = text as NSString
+        return (0..<m.numberOfRanges).map { m.range(at: $0).location == NSNotFound ? "" : s.substring(with: m.range(at: $0)) }
+    }
+
+    private static func findStylePrefix(in s: NSString, after lowerBound: Int, before divIndex: Int) -> Int {
+        guard lowerBound < divIndex,
+              let regex = try? NSRegularExpression(pattern: #"(?is)<style\b[^>]*>.*?</style\s*>"#) else { return divIndex }
+        let searchRange = NSRange(location: lowerBound, length: divIndex - lowerBound)
+        var cursor = divIndex
+        for match in regex.matches(in: s as String, range: searchRange).reversed() {
+            let end = NSMaxRange(match.range)
+            let gap = NSRange(location: end, length: cursor - end)
+            guard s.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted, range: gap).location == NSNotFound else { break }
+            cursor = match.range.location
+        }
+        return cursor
+    }
+
+    private static func balanceDiv(in s: NSString, from start: Int) -> Int {
+        let tagPattern = #"(?is)<!--[\s\S]*?(?:-->|$)|<(script|style|pre|code|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>[\s\S]*?(?:</\1\s*>|$)|<(/?)([a-z][a-z0-9:-]*)(?:"[^"]*"|'[^']*'|[^'">])*>"#
+        guard let regex = try? NSRegularExpression(pattern: tagPattern) else { return s.length }
+        var depth = 1
+        var cursor = start
+        while cursor < s.length {
+            guard let m = regex.firstMatch(in: s as String, range: NSRange(location: cursor, length: s.length - cursor)) else { break }
+            let matchedTag = s.substring(with: m.range)
+            cursor = NSMaxRange(m.range)
+            // Skip comments and raw containers
+            if matchedTag.hasPrefix("<!--") || m.range(at: 1).location != NSNotFound { continue }
+            guard m.range(at: 3).location != NSNotFound else { continue }
+            let tagName = s.substring(with: m.range(at: 3)).lowercased()
+            if tagName == "div" {
+                let isClosing = m.range(at: 2).location != NSNotFound && s.substring(with: m.range(at: 2)) == "/"
+                depth += isClosing ? -1 : 1
+                if depth <= 0 { return cursor }
+            }
+        }
+        return s.length
+    }
+
+    private static let trailingScript = try! NSRegularExpression(
+        pattern: #"(?is)\s*<script\b[^>]*>.*?</script\s*>"#
+    )
+    private static func attachedScriptsEnd(in text: NSString, from start: Int) -> Int {
+        var end = start
+        while end < text.length,
+              let match = trailingScript.firstMatch(in: text as String, options: .anchored,
+                                                    range: NSRange(location: end, length: text.length - end)) {
+            end = NSMaxRange(match.range)
+        }
+        return end
+    }
+
     public static func document(_ source: String, motion: Bool, media: Bool, dark: Bool, emphasisColor: String? = nil) -> String {
         let color = dark ? "dark" : "light"
         let image = media ? "https: data:" : "'none'"
