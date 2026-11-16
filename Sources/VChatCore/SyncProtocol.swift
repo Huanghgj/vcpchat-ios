@@ -1,8 +1,9 @@
 import Foundation
 import CryptoKit
 
-/// Wire 1.5 canonical data; adapted from VCPChat's mobile-sync protocol.
+/// Wire 1.6 canonical data; adapted from VCPChat's mobile-sync protocol.
 public enum SyncWire {
+    public static let version = "1.6"
     public static func fail(_ message: String) -> ClientError { .server(message) }
     public static func object(_ value: JSONValue) throws -> [String:JSONValue] { guard case .object(let v) = value else { throw fail("同步响应对象无效") }; return v }
     public static func rows(_ value: JSONValue) throws -> [JSONValue] { guard case .array(let v) = value else { throw fail("同步响应缺少列表") }; for row in v { _ = try object(row) }; return v }
@@ -58,7 +59,7 @@ public enum SyncWire {
         return sign + String(digits.prefix(1)) + (digits.count > 1 ? "." + digits.dropFirst() : "") + "e" + (point-1 >= 0 ? "+" : "") + String(point-1)
     }
     public static let agentFields = ["name","systemPrompt","model","temperature","contextTokenLimit","maxOutputTokens","streamOutput"]
-    public static let groupFields = ["name","members","mode","memberTags","groupPrompt","invitePrompt","useUnifiedModel","unifiedModel","enableContextMessageWindow","contextMessageWindowSize","tagMatchMode","createdAt"]
+    public static let groupFields = ["name","members","mode","memberTags","groupPrompt","invitePrompt","useUnifiedModel","unifiedModel","tagMatchMode","createdAt"]
     public static func dtoHash(_ data: JSONValue,identity: SyncIdentity) -> String {
         let fields = identity.entityType == "owner" ? (identity.ownerType == "agent" ? agentFields : groupFields) : (identity.ownerType == "agent" ? ["id","name","createdAt","locked","unread"] : ["id","name","createdAt"])
         var filtered = data.object.filter { fields.contains($0.key) && $0.value != .null }
@@ -103,12 +104,81 @@ public enum SyncWire {
         }; return .object(out)
     }
 }
+
+struct SyncMessagePlan {
+    let pullAll: Bool
+    let pull: Set<String>
+    let push: Set<String>
+    let pushDeleted: [String:Double]
+    let delete: [String:Double]
+
+    init(_ row: JSONValue, topic: SyncIdentity, live: [String:JSONValue], deleted: [String:Double]) throws {
+        guard try SyncIdentity(row,kind: "topic") == topic else { throw SyncWire.fail("消息差分身份不符") }
+        if row["ok"].bool == false { throw SyncWire.fail(try SyncWire.errorMessage(row["error"])) }
+        let keys: Set<String> = ["ownerType","ownerId","topicId","ok","pullAll","pullMessageIds","pushMessageIds","pushDeletedMessages","deleteMessages"]
+        guard row["ok"].bool == true,Set(row.object.keys) == keys,let pullAll = row["pullAll"].bool else {
+            throw SyncWire.fail("Wire 1.6 消息差分格式无效")
+        }
+        self.pullAll = pullAll
+        pull = try Self.ids(row["pullMessageIds"])
+        push = try Self.ids(row["pushMessageIds"])
+        pushDeleted = try Self.tombstones(row["pushDeletedMessages"])
+        delete = try Self.tombstones(row["deleteMessages"])
+        let all = pull.union(push).union(pushDeleted.keys).union(delete.keys)
+        guard all.count == pull.count + push.count + pushDeleted.count + delete.count,
+              !pullAll || (all.isEmpty && live.isEmpty && deleted.isEmpty),
+              pull.allSatisfy({ deleted[$0] == nil }),
+              push.allSatisfy({ live[$0] != nil }),
+              delete.keys.allSatisfy({ live[$0] != nil }),
+              pushDeleted.allSatisfy({ deleted[$0.key] == $0.value }) else {
+            throw SyncWire.fail("消息差分与本机记录不一致，未应用")
+        }
+    }
+
+    private static func ids(_ value: JSONValue) throws -> Set<String> {
+        guard case .array(let rows) = value else { throw SyncWire.fail("消息差分缺少身份列表") }
+        var ids = Set<String>()
+        for row in rows {
+            guard case .string(let id) = row,!id.isEmpty,ids.insert(id).inserted else { throw SyncWire.fail("消息差分身份无效或重复") }
+        }
+        return ids
+    }
+
+    private static func tombstones(_ value: JSONValue) throws -> [String:Double] {
+        var deleted: [String:Double] = [:]
+        for row in try SyncWire.rows(value) {
+            guard Set(row.object.keys) == ["msgId","deletedAt"],case .string(let id) = row["msgId"],
+                  !id.isEmpty,deleted[id] == nil else { throw SyncWire.fail("消息删除标记无效或重复") }
+            deleted[id] = try SyncWire.time(row["deletedAt"])
+        }
+        return deleted
+    }
+}
+
+extension SyncWire {
+    static func errorMessage(_ value: JSONValue) throws -> String {
+        let fields: Set<String> = ["code","origin","stage","kind","retry","message","failedTopicIds"]
+        guard Set(value.object.keys) == fields,
+              fields.subtracting(["failedTopicIds"]).allSatisfy({ if case .string(let s) = value[$0] { !s.isEmpty } else { false } }),
+              case .array(let ids) = value["failedTopicIds"],
+              ids.allSatisfy({ if case .string(let s) = $0 { !s.isEmpty } else { false } }) else {
+            throw fail("Wire 1.6 错误响应格式无效")
+        }
+        return value["code"].text + "：" + value["message"].text
+    }
+}
+
 public struct SyncIdentity: Codable, Sendable, Equatable, Hashable {
     public var entityType: String; public var ownerType: String; public var ownerId: String; public var topicId: String?
     public init(entityType: String,ownerType: String,ownerId: String,topicId: String? = nil) { self.entityType = entityType; self.ownerType = ownerType; self.ownerId = ownerId; self.topicId = topicId }
     public init(_ raw: JSONValue,kind: String) throws {
-        guard ["agent","group"].contains(raw["ownerType"].text),case .string = raw["ownerId"],!raw["ownerId"].text.isEmpty,kind != "topic" || (raw["topicId"].text != "" && raw["topicId"].text.utf8.count > 0) else { throw SyncWire.fail("同步返回身份不完整") }
-        self.init(entityType: kind,ownerType: raw["ownerType"].text,ownerId: raw["ownerId"].text,topicId: kind == "topic" ? raw["topicId"].text : nil)
+        guard ["agent","group"].contains(raw["ownerType"].text),case .string(let owner) = raw["ownerId"],!owner.isEmpty else { throw SyncWire.fail("同步返回身份不完整") }
+        if kind == "topic" {
+            guard case .string(let topic) = raw["topicId"],!topic.isEmpty else { throw SyncWire.fail("同步返回话题身份不完整") }
+            self.init(entityType: kind,ownerType: raw["ownerType"].text,ownerId: owner,topicId: topic)
+        } else {
+            self.init(entityType: kind,ownerType: raw["ownerType"].text,ownerId: owner)
+        }
     }
     public var key: String { ([entityType,ownerType,ownerId] + (entityType == "topic" ? [topicId ?? ""] : [])).joined(separator: "\0") }
     public var topicKey: String { [ownerType,ownerId,topicId ?? ""].joined(separator: "\0") }
