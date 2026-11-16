@@ -32,6 +32,10 @@ struct SettingsView: View {
                         HStack(spacing: 8) { WorkspaceMenuRow(title: "回车键发送消息",icon: "keyboard",color: Color(rgb: 0x71a8d5),subtitle: model.inputPreferences.enterSends ? "回车发送，点“换行”插入新行" : "回车换行，点箭头发送",chevron: false); Toggle("回车键发送消息",isOn: $model.inputPreferences.enterSends).labelsHidden().toggleStyle(.switch).padding(.trailing,14) }
                         WorkspaceSeparator(palette: palette)
                         NavigationLink { RenderingSettings(model: model).workspaceDetailNavigation() } label: { row("高级渲染","render",model.renderOptions.enabled ? "已开启" : "轻量模式",purple: true) }
+                        #if os(iOS)
+                        WorkspaceSeparator(palette: palette)
+                        NavigationLink { AdvancedReplySettingsView(model: model).workspaceDetailNavigation() } label: { row("高级回复","chat","气泡与工具提示词 · 注入位置和覆盖",purple: true) }.disabled(model.loading)
+                        #endif
                         WorkspaceSeparator(palette: palette)
                         NavigationLink { AppearanceSettingsView(model: model).workspaceDetailNavigation() } label: { row("外观","palette",model.appearance.theme.title,purple: true) }
                         WorkspaceSeparator(palette: palette)
@@ -82,16 +86,37 @@ private struct AboutVChat: View {
 }
 private struct RenderingSettings: View {
     @Bindable var model: ChatViewModel
+    @State private var savingBubbleRule = false
     private var palette: WorkspacePalette { .init(theme: model.appearance.theme) }
+    private var bubbleRule: Binding<Bool> {
+        #if os(iOS)
+        Binding(get: { model.advancedReplies.animatedBubbles },set: { enabled in
+            var value = model.advancedReplies
+            value.animatedBubbles = enabled
+            savingBubbleRule = true
+            Task { @MainActor in
+                defer { savingBubbleRule = false }
+                do { try await model.saveAdvancedReplies(value) }
+                catch { model.error = error.localizedDescription }
+            }
+        })
+        #else
+        $model.outputPreferences.animatedBubbles
+        #endif
+    }
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                Toggle(isOn: $model.outputPreferences.animatedBubbles) {
+                Toggle(isOn: bubbleRule) {
                     VStack(alignment: .leading,spacing: 5) {
                         Text("Agent 输出动画气泡").font(.headline)
+                        #if os(iOS)
+                        Text("设置「高级回复」中动画气泡规则的全局启停；Agent 或群组可单独覆盖。与下方显示开关独立。").font(.caption).foregroundStyle(palette.muted)
+                        #else
                         Text("向新请求追加 VCP 气泡输出规范，不改变已有消息。与下方显示开关独立。").font(.caption).foregroundStyle(palette.muted)
+                        #endif
                     }
-                }.toggleStyle(.switch).padding(18).workspaceGlass(palette)
+                }.toggleStyle(.switch).disabled(savingBubbleRule || model.loading).padding(18).workspaceGlass(palette)
                 Toggle("高级渲染",isOn: $model.renderOptions.enabled).font(.headline).padding(18).workspaceGlass(palette)
                 VStack(spacing: 0) {
                     toggle("代码高亮","代码块的语法着色",$model.renderOptions.code)
@@ -104,7 +129,9 @@ private struct RenderingSettings: View {
             }.padding(20).frame(maxWidth: 760).frame(maxWidth: .infinity)
         }.navigationTitle("高级渲染").background(ThemeWallpaper(model.appearance,animations: model.renderOptions.motion).ignoresSafeArea()).tint(palette.accent)
         .onChange(of: model.renderOptions) { _,_ in Task { await model.saveRenderOptions() } }
+        #if os(macOS)
         .onChange(of: model.outputPreferences) { _,_ in Task { await model.saveOutputPreferences() } }
+        #endif
     }
     private func toggle(_ title: String,_ subtitle: String,_ binding: Binding<Bool>) -> some View { VStack(spacing: 0) { Toggle(isOn: binding) { VStack(alignment: .leading,spacing: 4) { Text(title).font(.system(size: 15,weight: .semibold)); Text(subtitle).font(.system(size: 13)).foregroundStyle(palette.muted) } }.toggleStyle(.switch).accessibilityLabel(title).padding(17); WorkspaceSeparator(palette: palette) } }
 }

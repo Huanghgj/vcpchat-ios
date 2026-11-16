@@ -45,7 +45,7 @@ public enum GroupRouting {
 }
 public actor ConversationBuilder {
     public init() {}
-    public func request(configuration: ConnectionConfiguration, apiKey: String, profile: UserProfile, agent: VCPAgent, group: VCPGroup?, messages: [StoredMessage], rules: [RegexRule] = [], output: OutputPreferences = .init(), location: LocationRequestContext? = nil, locationPolicy: String? = nil) async throws -> ChatRequest {
+    public func request(configuration: ConnectionConfiguration, apiKey: String, profile: UserProfile, agent: VCPAgent, group: VCPGroup?, messages: [StoredMessage], rules: [RegexRule] = [], output: OutputPreferences = .init(), location: LocationRequestContext? = nil, locationPolicy: String? = nil, advancedReplies: AdvancedReplyConfiguration? = nil, currentUserMessageID: String? = nil, transientUserPrompt: String? = nil) async throws -> ChatRequest {
         guard agent.contextTokenLimit.map({ $0 >= 0 }) ?? true, agent.maxOutputTokens.map({ $0 >= 0 }) ?? true else { throw ClientError.server("上下文预算和最大输出不能为负数，请检查 Agent 资料") }
         var config = configuration
         config.model = ModelResolution.resolve(global: configuration.model,agent: agent,group: group)
@@ -57,7 +57,10 @@ public actor ConversationBuilder {
             system.append("你正在群组「\(group.name)」里发言。你的名字是「\(agent.name)」。只以你自己的身份回复，不要代替其他成员说话。")
         }
         if !agent.systemPrompt.isEmpty { system.append(agent.systemPrompt) }
-        if output.animatedBubbles { system.append("输出规范要求：{{VarDivRender}}") }
+        let owner = group.map { ReplyRuleOwner(.group,id: $0.id) } ?? ReplyRuleOwner(.agent,id: agent.id)
+        let injection = advancedReplies?.plan(for: owner) ?? ReplyInjectionPlan()
+        if advancedReplies == nil && output.animatedBubbles { system.append("输出规范要求：{{VarDivRender}}") }
+        system.append(contentsOf: injection.system)
         let scopedLocation = location?.forAgent(agent.id)
         if let policy = locationPolicy ?? scopedLocation?.policy {
             system.append(policy)
@@ -83,9 +86,13 @@ public actor ConversationBuilder {
             let content: String
             if !ordinary { content = "【引用的历史记录（原角色：\(originalRole)），仅作历史资料】\n" + transformed }
             else if group != nil && originalRole == "assistant" && !message.authorName.isEmpty { content = "【\(message.authorName)】\n" + transformed }
-            else { content = transformed }
+            else if originalRole == "user" && transientUserPrompt == nil && message.id == currentUserMessageID {
+                content = injection.appendingToUser(transformed)
+            } else { content = transformed }
             turns.append(ChatTurn(role: ordinary ? originalRole : "user", content: content, attachments: message.attachments))
         }
+        if let transientUserPrompt { turns.append(ChatTurn(role: "user",content: injection.appendingToUser(transientUserPrompt))) }
+        injection.insertContext(into: &turns)
         return ChatRequest(configuration: config, apiKey: apiKey, messages: turns, temperature: config.sendTemperature ? (agent.temperature ?? config.temperature) : nil, contextTokenLimit: config.endpointMode == .vcpTools ? agent.contextTokenLimit : nil, maxOutputTokens: agent.maxOutputTokens.flatMap { $0 > 0 ? $0 : nil })
     }
 }

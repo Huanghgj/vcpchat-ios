@@ -16,9 +16,10 @@ let package = Package(
         // MermaidKit 2.10.2 / 8556a1b: Apple-only runtime, no Linux dependency traits.
         .target(name: "MermaidLayout",path: "Vendor/MermaidKit/Sources/MermaidLayout",swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
         .target(name: "MermaidRender",dependencies: ["MermaidLayout"],path: "Vendor/MermaidKit/Sources/MermaidRender",swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
-        .target(name: "VChatCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")], swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
+        .target(name: "VChatCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")], resources: [.process("Resources")], swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
         .target(name: "VChatRendering", dependencies: ["VChatCore", .product(name: "Markdown", package: "swift-markdown"), .product(name: "SwiftMath", package: "SwiftMath"), .product(name: "Highlighter", package: "HighlighterSwift"), .product(name: "SDWebImage", package: "SDWebImage"), "MermaidRender"], resources: [.process("Resources")], swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
-        .executableTarget(name: "VChatApp", dependencies: ["VChatCore", "VChatRendering"], swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])])
+        .executableTarget(name: "VChatApp", dependencies: ["VChatCore", "VChatRendering"], swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
+        .testTarget(name: "VChatCoreTests", dependencies: ["VChatCore"])
     ],
     swiftLanguageModes: [.v6]
 )
