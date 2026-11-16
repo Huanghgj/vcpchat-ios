@@ -26,19 +26,23 @@ public actor MessageRenderer {
         guard options.enabled else { return [.literal(source)] }
         self.streaming = streaming
         var output: [RenderBlock] = []
-        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: HTMLIslandPolicy.accepts(source)) {
+        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: HTMLIslandPolicy.accepts(source) || HTMLIslandPolicy.containsIsland(source)) {
             switch segment {
             case .text(let prose):
-                if let island = island(prose,options: options) { output.append(island) }
-                else { output += try markdown(prose, options: options, dark: dark) }
+                for section in HTMLIslandPolicy.extractSections(from: prose) {
+                    switch section {
+                    case .island(let html):
+                        output.append(options.html ? .html(html) : .literal(html))
+                    case .markdown(let text):
+                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            output += try markdown(text, options: options, dark: dark)
+                        }
+                    }
+                }
             default: output.append(.vcp(segment))
             }
         }
         return output
-    }
-    private func island(_ source: String,options: RenderOptions) -> RenderBlock? {
-        guard HTMLIslandPolicy.accepts(source) else { return nil }
-        return options.html ? .html(source) : .literal(source)
     }
     private func markdown(_ source: String, options: RenderOptions, dark: Bool) throws -> [RenderBlock] {
         self.dark = dark
@@ -94,7 +98,13 @@ public actor MessageRenderer {
             }
         }
     }
-    private func restore(_ text: String) -> String { mathTokens.reduce(emphasisMarker.isEmpty ? text : text.replacingOccurrences(of: emphasisMarker,with: "").replacingOccurrences(of: escapedStarMarker,with: "\\*")) { $0.replacingOccurrences(of: $1.token, with: $1.original) } }
+    private func restore(_ text: String) -> String {
+        let restored = emphasisMarker.isEmpty ? text : text
+            .replacingOccurrences(of: MarkdownStrongCompatibility.boundary(for: emphasisMarker),with: "")
+            .replacingOccurrences(of: emphasisMarker,with: "")
+            .replacingOccurrences(of: escapedStarMarker,with: "\\*")
+        return mathTokens.reduce(restored) { $0.replacingOccurrences(of: $1.token, with: $1.original) }
+    }
     private func inline(_ node: any Markup, options: RenderOptions) -> [InlineRun] {
         if node.childCount == 0 { return inlineSource(node.detachedFromParent.format(),options: options) }
         var result: [InlineRun] = [],buffer = ""
@@ -127,6 +137,8 @@ public actor MessageRenderer {
     private func inlineSource(_ source: String,options: RenderOptions) -> [InlineRun] {
         var attributed = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)
         if !emphasisMarker.isEmpty {
+            let boundary = MarkdownStrongCompatibility.boundary(for: emphasisMarker)
+            while let range = attributed.range(of: boundary) { attributed.replaceSubrange(range,with: AttributedString()) }
             while let range = attributed.range(of: emphasisMarker) { attributed.replaceSubrange(range,with: AttributedString()) }
             while let range = attributed.range(of: escapedStarMarker) { attributed.replaceSubrange(range,with: AttributedString("*")) }
         }

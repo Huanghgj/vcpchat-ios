@@ -12,6 +12,7 @@ let package = Package(
         .package(url: "https://github.com/SDWebImage/SDWebImage.git", exact: "5.21.3")
     ],
     targets: [
+        .testTarget(name: "VChatRenderingTests", dependencies: ["VChatRendering"]),
         // MermaidKit 2.10.2 / 8556a1b: Apple-only runtime, no Linux dependency traits.
         .target(name: "MermaidLayout",path: "Vendor/MermaidKit/Sources/MermaidLayout",swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
         .target(name: "MermaidRender",dependencies: ["MermaidLayout"],path: "Vendor/MermaidKit/Sources/MermaidRender",swiftSettings: [.unsafeFlags(["-strict-concurrency=complete"])]),
