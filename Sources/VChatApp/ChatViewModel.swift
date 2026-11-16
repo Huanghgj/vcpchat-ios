@@ -63,7 +63,18 @@ struct TopicDraft: Codable, Sendable {
     var renderOptions = RenderOptions()
     var appearance = AppearanceSettings()
     var inputPreferences = InputPreferences()
+    #if os(iOS)
+    private(set) var advancedReplies = AdvancedReplyConfiguration()
+    #else
     var outputPreferences = OutputPreferences()
+    #endif
+    private var replySettings: (legacy: OutputPreferences, advanced: AdvancedReplyConfiguration?) {
+        #if os(iOS)
+        (.init(), advancedReplies)
+        #else
+        (outputPreferences, nil)
+        #endif
+    }
     var locationSettings = LocationSharingSettings() { didSet { locationSettingsRevision = UUID() } }
     @ObservationIgnored var locationSettingsRevision = UUID()
     var location: DeviceLocationService
@@ -143,7 +154,16 @@ struct TopicDraft: Codable, Sendable {
             profile = try await database.records(UserProfile.self, kind: "profile").first ?? UserProfile()
             regexRules = try await database.records([RegexRule].self, kind: "regex-global").first ?? []
             inputPreferences = try await database.records(InputPreferences.self, kind: "input-options").first ?? InputPreferences()
+            #if os(iOS)
+            if let saved = try await database.records(AdvancedReplyConfiguration.self,kind: "advanced-replies").first {
+                advancedReplies = saved
+            } else {
+                let old = try await database.records(OutputPreferences.self,kind: "output-options").first ?? OutputPreferences()
+                advancedReplies = try AdvancedReplyConfiguration.seeded(legacy: old)
+            }
+            #else
             outputPreferences = try await database.records(OutputPreferences.self, kind: "output-options").first ?? OutputPreferences()
+            #endif
             locationSettings = try await database.records(LocationSharingSettings.self,kind: "location-options").first ?? LocationSharingSettings()
             services = try await database.records(ServiceSettings.self, kind: "services").first ?? ServiceSettings()
             appearance = try await database.records(AppearanceSettings.self, kind: "appearance").first ?? AppearanceSettings()
@@ -196,10 +216,18 @@ struct TopicDraft: Codable, Sendable {
         do { try await store?.put(inputPreferences, kind: "input-options", id: "keyboard") }
         catch { self.error = error.localizedDescription }
     }
+    #if os(iOS)
+    func saveAdvancedReplies(_ value: AdvancedReplyConfiguration) async throws {
+        guard let store else { throw ClientError.server("本机数据库尚未就绪") }
+        try await store.put(value,kind: "advanced-replies",id: "rules")
+        advancedReplies = value
+    }
+    #else
     func saveOutputPreferences() async {
         do { try await store?.put(outputPreferences, kind: "output-options", id: "bubbles") }
         catch { self.error = error.localizedDescription }
     }
+    #endif
     func saveRenderOptions() async {
         do { try await store?.put(renderOptions, kind: "render-options", id: "display") }
         catch { self.error = error.localizedDescription }
@@ -372,7 +400,7 @@ struct TopicDraft: Codable, Sendable {
         let speakers = group.map { GroupRouting.speakers(group: $0, agents: agents, text: content, turn: topic.turnIndex) } ?? activeAgent.map { [$0] } ?? []
         guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return }
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
-        let config = configuration, key = apiKey, profile = profile, rules = regexRules, output = outputPreferences
+        let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         room.busy = true; room.cancellation = nil; room.error = nil
         room.generation = Task {
             var currentReply: MessageViewModel?
@@ -390,7 +418,7 @@ struct TopicDraft: Codable, Sendable {
                 let builder = ConversationBuilder()
                 for agent in speakers {
                     guard !room.cancelled else { break }
-                    let request = try await builder.request(configuration: config, apiKey: key, profile: profile, agent: agent, group: group, messages: room.messages.map(\.record), rules: rules, output: output, location: locationContext?.settings == locationSettings && locationSettings.shares(with: agent.id,preference: locationPreference) ? locationContext : nil, locationPolicy: locationSettings.shares(with: agent.id) ? LocationRequestContext.policy(settings: locationSettings,agentID: agent.id) : nil)
+                    let request = try await builder.request(configuration: config, apiKey: key, profile: profile, agent: agent, group: group, messages: room.messages.map(\.record), rules: rules, output: replies.legacy, location: locationContext?.settings == locationSettings && locationSettings.shares(with: agent.id,preference: locationPreference) ? locationContext : nil, locationPolicy: locationSettings.shares(with: agent.id) ? LocationRequestContext.policy(settings: locationSettings,agentID: agent.id) : nil, advancedReplies: replies.advanced, currentUserMessageID: user.id)
                     guard !room.cancelled else { break }
                     let assistant = MessageViewModel(StoredMessage(topicID: room.id, agentID: agent.id, authorName: agent.name, role: "assistant", content: "", status: "connecting"))
                     currentReply = assistant; room.messages.append(assistant); try await store.save(assistant.record)
@@ -439,7 +467,7 @@ struct TopicDraft: Codable, Sendable {
         guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return }
         guard let agent = authorAgent(for: message) else { room.error = "找不到写这条回复的 Agent"; return }
         let group = groups.first { $0.id == topic.ownerId && topic.ownerType == "group" }
-        let config = configuration, key = apiKey, profile = profile, rules = regexRules, output = outputPreferences
+        let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         let prefix = continuing ? message.text : "", reasoning = continuing ? message.reasoning : ""
         let history = (continuing ? room.messages : Array(room.messages.dropLast())).map(\.record)
         room.busy = true; room.cancellation = nil; room.error = nil
@@ -449,10 +477,9 @@ struct TopicDraft: Codable, Sendable {
                 let locationPreference = room.locationPreference
                 let locationContext = await prepareLocation(for: [agent],preference: locationPreference)
                 room.locationPreference = .automatic
-                let built = try await ConversationBuilder().request(configuration: config, apiKey: key, profile: profile, agent: agent, group: group, messages: history, rules: rules, output: output, location: locationContext, locationPolicy: locationSettings.shares(with: agent.id) ? LocationRequestContext.policy(settings: locationSettings,agentID: agent.id) : nil)
+                let prompt = continuing && !prefix.isEmpty ? "上一条回复在传输中断开了。请从断开的地方直接接着写，不要重复已经写过的内容，也不要解释。" : nil
+                let request = try await ConversationBuilder().request(configuration: config, apiKey: key, profile: profile, agent: agent, group: group, messages: history, rules: rules, output: replies.legacy, location: locationContext, locationPolicy: locationSettings.shares(with: agent.id) ? LocationRequestContext.policy(settings: locationSettings,agentID: agent.id) : nil, advancedReplies: replies.advanced, currentUserMessageID: history.last { ($0.originalRole ?? $0.role) == "user" }?.id, transientUserPrompt: prompt)
                 guard !room.cancelled else { return }
-                let prompt = ChatTurn(role: "user", content: "上一条回复在传输中断开了。请从断开的地方直接接着写，不要重复已经写过的内容，也不要解释。")
-                let request = ChatRequest(configuration: built.configuration, apiKey: built.apiKey, messages: built.messages + (continuing && !prefix.isEmpty ? [prompt] : []), temperature: built.temperature, contextTokenLimit: built.contextTokenLimit, maxOutputTokens: built.maxOutputTokens)
                 var record = message.record; record.content = prefix; record.reasoning = reasoning; record.status = "connecting"
                 try await store.reviseMessage(record)
                 message.text = prefix; message.reasoning = reasoning; message.status = "connecting"
