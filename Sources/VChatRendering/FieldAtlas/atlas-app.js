@@ -189,6 +189,15 @@ function mountAtlas(container, source, options = {}) {
     async function loadField(kind) {
         if (state.fields[kind]) return state.fields[kind];
         const data = await source.get(`/field/${kind}`);
+        // Validate dimensions before using a server-provided count for typed arrays
+        // or a radius interval as the termination condition of canvas drawing loops.
+        const columns = ['ids', 'radius', 'angle', 'flags', 'labels', 'group'];
+        const range = data?.radiusRange;
+        if (!Number.isSafeInteger(data?.count) || data.count < 0 ||
+            !columns.every(key => Array.isArray(data[key]) && data[key].length === data.count) ||
+            !Array.isArray(data.groups) || !Array.isArray(data.outside) || !data.snapshot ||
+            !Array.isArray(range) || range.length !== 2 || !range.every(Number.isFinite) ||
+            range[0] < 0 || range[1] <= range[0] || range[1] > 10) throw new Error('场快照数据不完整或半径范围不受支持。');
         data.maxQuantile = 1;
         data.bins = [0, 0, 0, 0, 0, 0];
         data.radius.forEach(r => { data.bins[Math.min(5, Math.max(0, Math.floor((r - 0.35) / 0.05 + 1e-9)))]++; });
@@ -372,6 +381,9 @@ function mountAtlas(container, source, options = {}) {
         try {
             const result = await source.get(route);
             if (disposed || mine !== queryToken) return;
+            if (!result?.query || !Array.isArray(result.distance) || !Array.isArray(result.theta) ||
+                result.distance.length !== field()?.count || result.theta.length !== field()?.count || !Array.isArray(result.contours))
+                throw new Error('查询结果与场快照不匹配，请重新加载。');
             state.query[kind] = prepareQuery(result);
             state.window[kind] = null;
             state.view = 'query';
@@ -441,7 +453,9 @@ function mountAtlas(container, source, options = {}) {
 
     // ---------- 查询视图的窗口 ----------
     function plotBox() {
-        return { left: 66, right: size.width - 26, top: 46, bottom: size.height - 108 };
+        const left = Math.min(66, size.width * 0.16), top = Math.min(46, size.height * 0.15);
+        return { left, right: size.width - Math.min(26, size.width * 0.07),
+            top, bottom: size.height - Math.min(108, size.height * 0.18) };
     }
     function currentSlice() {
         const f = field();
@@ -455,7 +469,7 @@ function mountAtlas(container, source, options = {}) {
         const q = query();
         if (!state.window[state.kind]) {
             const last = q.byDistance[Math.min(q.byDistance.length - 1, 59)];
-            state.window[state.kind] = [Math.max(0, Math.floor(q.thetaMin - 1.5)), Math.min(180, Math.ceil(q.theta[last] + 2))];
+            state.window[state.kind] = last == null ? [0, 180] : [Math.max(0, Math.floor(q.thetaMin - 1.5)), Math.min(180, Math.ceil(q.theta[last] + 2))];
         }
         return state.window[state.kind];
     }

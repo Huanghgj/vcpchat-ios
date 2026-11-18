@@ -23,6 +23,7 @@ public struct FieldAtlasView: View {
                 ContentUnavailableView("场图资源缺失", systemImage: "exclamationmark.triangle")
             }
         }
+        .toolbar(.visible, for: .navigationBar)
         .navigationTitle("双曲场图")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
