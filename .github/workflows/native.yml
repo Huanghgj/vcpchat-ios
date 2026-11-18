@@ -9,7 +9,7 @@ jobs:
   native:
     # The simulator can run on Intel; the iPhone archive still targets arm64.
     runs-on: macos-15-intel
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -23,18 +23,25 @@ jobs:
           sw_vers | tee "$VCHAT_ARTIFACTS/results/environment.log"
           xcodebuild -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
           swift -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
-      - name: Build iOS simulator app
-        run: |
-          set -o pipefail
-          xcodebuild -project VChat.xcodeproj -scheme VChat -configuration Debug \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
-            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build 2>&1 | tee "$VCHAT_ARTIFACTS/results/ios-build.log"
-      - name: Launch native app on simulator
+      - name: Select the iPhone simulator
         run: |
           set -euo pipefail
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if "iPhone" in x["name"]))')
+          echo "VCHAT_SIMULATOR=$device" >> "$GITHUB_ENV"
+      - name: Build the simulator app and its tests together
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing -project VChat.xcodeproj -scheme VChat -configuration Debug \
+            -destination "platform=iOS Simulator,id=$VCHAT_SIMULATOR" \
+            -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
+            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
+            ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/ios-build.log"
+      - name: Launch native app on simulator
+        id: launch
+        run: |
+          set -euo pipefail
+          device="$VCHAT_SIMULATOR"
           xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           app="$VCHAT_ARTIFACTS/tmp/DerivedData/Build/Products/Debug-iphonesimulator/VChat.app"
@@ -51,10 +58,11 @@ jobs:
       - name: Test iPhone keyboard and atlas bridge
         run: |
           set -euo pipefail
-          device=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys; print(next(x["udid"] for group in json.load(sys.stdin)["devices"].values() for x in group if "iPhone" in x["name"]))')
-          xcodebuild test -project VChat.xcodeproj -scheme VChat -destination "id=$device" \
+          xcodebuild test-without-building -project VChat.xcodeproj -scheme VChat -configuration Debug \
+            -destination "platform=iOS Simulator,id=$VCHAT_SIMULATOR" \
             -parallel-testing-enabled NO -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
+            ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
       - name: Build unsigned iPhone app
         run: |
@@ -65,6 +73,7 @@ jobs:
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
             CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$VCHAT_ARTIFACTS/results/iphone-build.log"
       - name: Package unsigned IPA
+        id: ipa
         run: |
           set -euo pipefail
           app="$VCHAT_ARTIFACTS/tmp/DeviceDerivedData/Build/Products/Release-iphoneos/VChat.app"
@@ -74,7 +83,7 @@ jobs:
           (cd "$VCHAT_ARTIFACTS/tmp/ipa" && zip -qry "$VCHAT_ARTIFACTS/products/VChat-unsigned.ipa" Payload)
           unzip -t "$VCHAT_ARTIFACTS/products/VChat-unsigned.ipa"
       - name: Save simulator app
-        if: always()
+        if: ${{ !cancelled() && steps.launch.outcome == 'success' }}
         uses: actions/upload-artifact@v7.0.2
         with:
           name: VChat-iOS-simulator
@@ -83,7 +92,7 @@ jobs:
             ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/products/VChat-iOS.png
           if-no-files-found: error
       - name: Save unsigned IPA
-        if: always()
+        if: ${{ !cancelled() && steps.ipa.outcome == 'success' }}
         uses: actions/upload-artifact@v7.0.2
         with:
           name: VChat-iOS-unsigned
