@@ -27,3 +27,7 @@ VChat 参考并适配了以下项目的协议与交互：
 MermaidKit 2.10.2，源码版本 `8556a1b8`。Copyright 2026 Clint Ecker。
 
 本项目纳入 Apple 原生解析、布局和绘制组件，适配 Swift 6.0 工程配置，添加有像素上限的 Actor 绘制入口，并修正显式 XY 轴范围与裁切。完整许可保留于组件目录及应用资源。
+
+### 双曲场图
+
+场图绘制、话题团展开、节点查询和黎曼切片使用 [VCPChat 双曲场图](https://github.com/lioensky/VCPChat/tree/a070768d623519a7b69abedd1c4340e6030076f5/modules/warpedFieldAtlas)（VCPChat 贡献者，CC BY-NC-SA 4.0）。iOS 适配了本地资源加载、手机布局、触屏选点和双指缩放；数据通过原生只读接口取得。改编沿用同一许可。

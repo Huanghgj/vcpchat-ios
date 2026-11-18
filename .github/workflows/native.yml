@@ -1,7 +1,7 @@
 name: Native iOS Build
 on:
   pull_request:
-    paths: ['Sources/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
+    paths: ['Sources/**', 'IntegrationTests/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -47,6 +47,14 @@ jobs:
           mkdir -p "$VCHAT_ARTIFACTS/products"
           xcrun simctl io "$device" screenshot "$VCHAT_ARTIFACTS/products/VChat-iOS.png"
           ditto -c -k --keepParent "$app" "$VCHAT_ARTIFACTS/products/VChat-iOS-simulator.zip"
+      - name: Test iPhone keyboard and atlas bridge
+        run: |
+          set -euo pipefail
+          device=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys; print(next(x["udid"] for group in json.load(sys.stdin)["devices"].values() for x in group if "iPhone" in x["name"]))')
+          xcodebuild test -project VChat.xcodeproj -scheme VChat -destination "id=$device" \
+            -parallel-testing-enabled NO -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
+            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
       - name: Build unsigned iPhone app
         run: |
           set -o pipefail

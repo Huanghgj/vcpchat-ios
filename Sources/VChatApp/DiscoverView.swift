@@ -16,6 +16,13 @@ struct DiscoverView: View {
                         VStack(spacing: 0) {
                             NavigationLink { MemoryCenterView(model: model) } label: { WorkspaceMenuRow(title: "VCP 记忆",icon: "brain",color: Color(rgb: 0xad93db),subtitle: "检索、编辑与整理服务器记忆") }
                             WorkspaceSeparator(palette: palette)
+                            #if os(iOS)
+                            NavigationLink {
+                                FieldAtlasView(configuration: model.configuration, key: model.apiKey)
+                                    .id([model.configuration.server, model.apiKey])
+                            } label: { WorkspaceMenuRow(title: "双曲场图",icon: "database",color: Color(rgb: 0xcf9867),subtitle: "探索标签、知识片段和检索距离") }
+                            WorkspaceSeparator(palette: palette)
+                            #endif
                             row("记忆检索动态",icon: "logs",color: Color(rgb: 0xad93db),subtitle: "实时查看记忆事件",section: 2,filter: .memory)
                             WorkspaceSeparator(palette: palette)
                             row("RAG 监视器",icon: "database",color: Color(rgb: 0x71a8d5),subtitle: "知识库、元思考与 Agent 事件",section: 2)

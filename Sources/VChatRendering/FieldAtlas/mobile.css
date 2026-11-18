@@ -1,0 +1,38 @@
+:root {
+    color-scheme: light dark;
+    --primary-bg: #fbfaf6; --secondary-bg: #f3f2ee; --accent-bg: #e8e9e3;
+    --border-color: #c6ccc5; --primary-text: #172a24; --secondary-text: #495e55;
+    --button-bg: #29725d; --highlight-text: #965321; --text-on-accent: white;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --primary-bg: #151c1a; --secondary-bg: #1e2824; --accent-bg: #293530;
+        --border-color: #41544c; --primary-text: #ecf1ec; --secondary-text: #afc2b9;
+        --button-bg: #83bfa7; --highlight-text: #ebb583; --text-on-accent: #151c1a; }
+}
+html, body, #atlas { height: 100%; margin: 0; overflow: hidden; }
+.wa-head { gap: 6px; height: auto; padding: 5px 8px; flex-wrap: wrap; }
+.wa-title { display: none; } /* The native navigation bar carries the title. */
+.wa-search { min-width: 100px; }
+.wa-search input, .wa-input { font-size: 16px; height: 40px; border-radius: 6px; }
+.wa-search-list { top: 100%; max-height: min(270px, 40vh); }
+.wa-seg button, .wa-root .wa-reset, .wa-root .wa-btn, .wa-root .wa-list button,
+.wa-search-list button, .wa-root .wa-toggle { min-height: 44px; }
+.wa-stage canvas { touch-action: none; }
+.wa-stage canvas.wa-mini { width: 82px; height: 82px; inset: 6px auto auto 6px; }
+.wa-zoom { position: absolute; top: 6px; right: 6px; display: flex; gap: 1px; }
+.wa-zoom button { width: 44px; height: 44px; font-size: 20px; background: var(--wa-ink-1); }
+.wa-stage .wa-plate { bottom: 3px; left: 8px; }
+.wa-side { overscroll-behavior: contain; }
+@media (max-width: 700px) {
+    .wa-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 55fr) minmax(0, 45fr); }
+    .wa-head .wa-search { flex: 1 0 100%; }
+    .wa-head .wa-reset { margin-left: auto; }
+    .wa-head .wa-seg button { padding: 4px 10px; }
+    .wa-side { border-left: none; border-top: 1px solid var(--wa-line); padding: 12px 14px 20px; }
+    .wa-plate-note { display: none; } /* Also available in the scrollable detail panel. */
+}
+@media (orientation: landscape) and (max-height: 560px) {
+    .wa-body { grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); grid-template-rows: minmax(0, 1fr); }
+    .wa-head .wa-search { flex: 1; }
+    .wa-plate-note { display: none; }
+}
