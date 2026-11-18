@@ -84,11 +84,56 @@ final class PhoneInteractionTests: XCTestCase {
     @MainActor func testBundledAtlasCanCallNativeBridge() async throws {
         let window = try host(FieldAtlasView(configuration: .init(server: "https://example.invalid"), key: ""))
         defer { window.isHidden = true }
-        try await eventually("bundled atlas displays the native missing-key response") {
-            guard let web = self.find(WKWebView.self, in: window),
-                  let message = try? await web.evaluateJavaScript("document.querySelector('.wa-message')?.textContent") as? String else { return false }
-            // This exact response comes from the native /status request, before any network I/O.
-            return message.contains("聊天 API Key")
+        try await eventually("atlas mounts a web view") { self.find(WKWebView.self, in: window) != nil }
+        let web = try XCTUnwrap(find(WKWebView.self, in: window))
+
+        // Reading JS during provisional navigation can target the empty document. Use
+        // native state while WebKit cold-starts; keep the bridge assertion separate.
+        let clock = ContinuousClock()
+        let loadDeadline = clock.now + .seconds(60)
+        while web.isLoading || web.url?.isFileURL != true {
+            guard clock.now < loadDeadline else {
+                return XCTFail("Atlas navigation timed out: page=\(web.url?.lastPathComponent ?? "none"), progress=\(web.estimatedProgress), loading=\(web.isLoading)")
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        XCTAssertEqual(web.url?.lastPathComponent, "index.html")
+
+        // One WebKit call, in an isolated world, observes the visible DOM. The bundled
+        // page must still call /status and render the real native client's reply.
+        let observation = """
+        const message = document.querySelector('.wa-message');
+        if (!message) throw new Error('Atlas did not mount; document=' + document.readyState);
+        const visibleText = () => message.isConnected && !message.hidden && message.textContent.trim();
+        if (visibleText()) return visibleText();
+        return await new Promise((resolve, reject) => {
+            const observer = new MutationObserver(() => {
+                const text = visibleText();
+                if (text) { observer.disconnect(); clearTimeout(timer); resolve(text); }
+            });
+            const timer = setTimeout(() => {
+                observer.disconnect();
+                reject(new Error('Atlas mounted but rendered no status; hidden=' + message.hidden));
+            }, 30000);
+            observer.observe(message, { childList: true, subtree: true, characterData: true, attributes: true });
+        });
+        """
+        var rendered: Result<Any, any Error>?
+        web.callAsyncJavaScript(observation, arguments: [:], in: nil, in: .defaultClient) { rendered = $0 }
+        let replyDeadline = clock.now + .seconds(45)
+        while rendered == nil {
+            guard clock.now < replyDeadline else {
+                return XCTFail("WebContent did not complete the DOM observation after the local page loaded")
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        switch try XCTUnwrap(rendered) {
+        case .success(let value):
+            let message = try XCTUnwrap(value as? String)
+            XCTAssertTrue(message.contains("请先在服务器设置中填写聊天 API Key。"), "Unexpected visible status: \(message)")
+        case .failure(let error):
+            let detail = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
+            XCTFail("Atlas status observation failed: \(detail ?? error.localizedDescription)")
         }
     }
 }

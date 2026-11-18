@@ -77,7 +77,12 @@ jobs:
         run: |
           set -euo pipefail
           app="$VCHAT_ARTIFACTS/tmp/DeviceDerivedData/Build/Products/Release-iphoneos/VChat.app"
-          test -f "$app/VChat"
+          xcrun lipo -verify_arch arm64 "$app/VChat"
+          atlas_page=$(find "$app" -type f -path '*/FieldAtlas/index.html' -print)
+          test -s "$atlas_page"
+          for asset in metric-slice.js atlas-app.js mobile.js atlas.css mobile.css; do
+            test -s "$(dirname "$atlas_page")/$asset"
+          done
           mkdir -p "$VCHAT_ARTIFACTS/tmp/ipa/Payload" "$VCHAT_ARTIFACTS/products"
           ditto "$app" "$VCHAT_ARTIFACTS/tmp/ipa/Payload/VChat.app"
           (cd "$VCHAT_ARTIFACTS/tmp/ipa" && zip -qry "$VCHAT_ARTIFACTS/products/VChat-unsigned.ipa" Payload)
