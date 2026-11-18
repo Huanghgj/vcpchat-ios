@@ -33,9 +33,20 @@ public final class FieldAtlasClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
+        // Large snapshots must not grow the native buffer without bound before WebKit draws them.
+        defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw ClientError.server("未收到有效的服务器响应。") }
-        if !(200..<300).contains(http.statusCode) {
+        let success = (200..<300).contains(http.statusCode)
+        let limit = success ? 32 * 1024 * 1024 : 64 * 1024
+        guard http.expectedContentLength <= Int64(limit) else { throw ClientError.server("场图响应过大，请缩小知识库快照。") }
+        var data = Data()
+        if http.expectedContentLength > 0 { data.reserveCapacity(Int(http.expectedContentLength)) }
+        for try await byte in bytes {
+            guard data.count < limit else { throw ClientError.server("场图响应过大，请缩小知识库快照。") }
+            data.append(byte)
+        }
+        if !success {
             if [401, 403].contains(http.statusCode) { throw ClientError.server("无权读取双曲场图，请检查聊天 API Key。") }
             if (300..<400).contains(http.statusCode) { throw ClientError.server("服务器返回重定向，请填写 VCP 的直接地址。") }
             if data.count < 64_000, let error = try? JSONDecoder().decode(PluginError.self, from: data), !error.message.isEmpty {

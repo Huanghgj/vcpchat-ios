@@ -13,6 +13,10 @@ try {
   window.requests=[];
   window.webkit={messageHandlers:{atlasRead:{postMessage:async route=>{
     requests.push(route);
+    if (window.holdQuery && route.includes('/query?')) {
+        window.holdQuery = false;
+        await new Promise(resolve=>{window.finishQuery=resolve;});
+    }
     if(route==='/status')return JSON.stringify({fields:{tag:{available:true},chunk:{available:true}},messages:{available:true}});
     if(/^\/field\/(tag|chunk)$/.test(route))return JSON.stringify(f);
     if(route==='/field/chunk/node/1')return JSON.stringify({id:1,index:0,label:'春',diary:'日记',path:'test.md',inField:true,group:0,radius:.4,text:'示例正文',tags:[]});
@@ -49,6 +53,13 @@ try {
  await clickText('黎曼切片');await p.waitForFunction('document.querySelector(".wa-plate-note").textContent.includes("黎曼") || document.querySelector(".wa-side [aria-pressed=true]").textContent.includes("黎曼")');
  await p.waitForSelector('.wa-input');await p.type('.wa-input','你好');await p.waitForFunction('requests.includes("/messages?q=%E4%BD%A0%E5%A5%BD")');
  await p.click('.wa-list .wa-stack');await p.waitForFunction('requests.includes("/field/chunk/query?message=abcd1234")');
+ await clickText('全景');
+ await p.evaluate(()=>{ window.holdQuery=true; window.pending=atlas.runQuery(1); });
+ await p.waitForFunction('typeof window.finishQuery==="function"');
+ await clickText('Tag 场');
+ await p.evaluate(async()=>{ window.finishQuery(); await window.pending; });
+ assert.equal(await p.evaluate('atlas.inspect().view'),'panorama');
+ assert.equal(await p.evaluate('atlas.inspect().kind'),'tag');
  assert.deepEqual(errors,[]);
  console.log('PASS phone portrait/landscape, local resources, Tag/Chunk, zoom buttons + multi-touch, detail, node + message query, metric projection');
 }finally{await browser.close();}

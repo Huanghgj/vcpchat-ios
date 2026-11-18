@@ -1,5 +1,8 @@
 name: Native iOS Build
 on:
+  # A fork can build a sideload preview before its inherited workflow is registered for dispatch.
+  push:
+    branches: ['build/ios-preview']
   pull_request:
     paths: ['Sources/**', 'IntegrationTests/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
   workflow_dispatch:

@@ -151,7 +151,8 @@ function mountAtlas(container, source, options = {}) {
         hitY[hitCount] = y;
         hitCount += 1;
     }
-    let requestToken = 0;
+    let requestToken = 0, queryToken = 0;
+    let hasStatus = false;
 
     const field = () => state.fields[state.kind];
     const query = () => state.query[state.kind];
@@ -187,7 +188,6 @@ function mountAtlas(container, source, options = {}) {
     // ---------- 取数 ----------
     async function loadField(kind) {
         if (state.fields[kind]) return state.fields[kind];
-        showMessage('正在读取');
         const data = await source.get(`/field/${kind}`);
         data.maxQuantile = 1;
         data.bins = [0, 0, 0, 0, 0, 0];
@@ -206,7 +206,6 @@ function mountAtlas(container, source, options = {}) {
         data.byRadius = Uint32Array.from({ length: data.count }, (_, i) => i).sort((a, b) => data.radius[a] - data.radius[b]);
         data.labelWidth = new Float32Array(data.count);
         state.fields[kind] = data;
-        showMessage('');
         return data;
     }
 
@@ -280,47 +279,46 @@ function mountAtlas(container, source, options = {}) {
         renderHead();
         try {
             const status = await source.get('/status');
+            if (disposed) return;
+            hasStatus = true;
             state.available = status.fields || {};
             state.messages = status.messages?.available === true;
-            if (!state.available.tag?.available && state.available.chunk?.available) state.kind = 'chunk';
-            if (!state.available[state.kind]?.available) {
-                showMessage(state.available[state.kind]?.reason || '这个知识库还没有双曲场文件。');
-                renderSide();
-                return;
-            }
-            await loadField(state.kind);
-            renderHead();
-            renderSide();
-            schedule();
+            const initial = state.available.tag?.available || !state.available.chunk?.available ? 'tag' : 'chunk';
+            await switchKind(initial);
         } catch (error) {
-            showMessage(error.message);
+            if (!disposed) showMessage(error.message);
         }
     }
 
     async function switchKind(kind, keepSelection = false) {
-        if (kind === state.kind && state.fields[kind]) return;
-        if (state.available[kind] && !state.available[kind].available) {
-            state.kind = kind;
-            if (!keepSelection) { state.selected = null; state.detail = null; state.nearby = null; }
-            renderHead();
-            renderSide();
-            showMessage(state.available[kind].reason);
-            schedule();
+        if (!hasStatus || (kind === state.kind && state.fields[kind])) return;
+        queryToken++;
+        if (!keepSelection) { requestToken++; state.selected = null; state.detail = null; state.nearby = null; }
+        state.kind = kind;
+        renderHead();
+        renderSide();
+        schedule();
+        if (!state.available[kind]?.available) {
+            showMessage(state.available[kind]?.reason || '这个知识库还没有双曲场文件。');
             return;
         }
-        state.kind = kind;
-        if (!keepSelection) { state.selected = null; state.detail = null; state.nearby = null; }
-        renderHead();
+        showMessage(state.fields[kind] ? '' : '正在读取');
         try {
             await loadField(kind);
+            if (disposed || state.kind !== kind) return;
+            showMessage('');
         } catch (error) {
+            if (disposed || state.kind !== kind) return;
             showMessage(error.message);
         }
+        renderHead();
         renderSide();
         schedule();
     }
 
     function switchView(view) {
+        queryToken++;
+        if (field()) showMessage('');
         state.view = view;
         renderHead();
         if (view === 'query' && !query() && state.selected && state.selected.kind === state.kind && !state.selected.outside) {
@@ -335,6 +333,7 @@ function mountAtlas(container, source, options = {}) {
     async function select(kind, target, { center = false, nearby = null, keepNearby = false } = {}) {
         const mine = ++requestToken;
         if (kind !== state.kind) await switchKind(kind, true);
+        if (disposed || mine !== requestToken || state.kind !== kind) return;
         if (!keepNearby) state.nearby = nearby;
         state.selected = { kind, index: target.index ?? null, id: target.id, outside: target.index == null };
         state.detail = null;
@@ -365,18 +364,20 @@ function mountAtlas(container, source, options = {}) {
     /** target：节点编号，或 { message: 对话消息的 hash }。 */
     async function runQuery(target) {
         const kind = state.kind;
+        const mine = ++queryToken;
         const route = target && typeof target === 'object'
             ? `/field/${kind}/query?message=${encodeURIComponent(target.message)}`
             : `/field/${kind}/query?node=${encodeURIComponent(target)}`;
         showMessage('正在计算');
         try {
             const result = await source.get(route);
-            if (disposed) return;
+            if (disposed || mine !== queryToken) return;
             state.query[kind] = prepareQuery(result);
             state.window[kind] = null;
             state.view = 'query';
             showMessage('');
         } catch (error) {
+            if (disposed || mine !== queryToken) return;
             showMessage(error.message);
         }
         renderHead();
@@ -1601,7 +1602,7 @@ function mountAtlas(container, source, options = {}) {
         ]));
         const actions = el(doc, 'div', 'wa-actions');
         actions.append(button('以此为查询', () => runQuery(d.id), true), ...focusButton(d.group));
-        if (state.view === 'query') actions.append(button('回到全景', () => { state.view = 'panorama'; centerOn(d.index); renderHead(); renderSide(); schedule(); }));
+        if (state.view === 'query') actions.append(button('回到全景', () => { switchView('panorama'); centerOn(d.index); }));
         headBox.append(actions);
 
         const lines = section('连线');
@@ -1653,7 +1654,7 @@ function mountAtlas(container, source, options = {}) {
             headBox.append(rows([['半径', fixed(d.radius, 4)], ['话题团', group ? `${group.label}（${group.count}）` : null]]));
             const actions = el(doc, 'div', 'wa-actions');
             actions.append(button('以此为查询', () => runQuery(d.id), true), ...focusButton(d.group));
-            if (state.view === 'query') actions.append(button('回到全景', () => { state.view = 'panorama'; centerOn(d.index); renderHead(); renderSide(); schedule(); }));
+            if (state.view === 'query') actions.append(button('回到全景', () => { switchView('panorama'); centerOn(d.index); }));
             headBox.append(actions);
         }
         const text = section('正文');
@@ -1745,7 +1746,7 @@ function mountAtlas(container, source, options = {}) {
         }
         const actions = el(doc, 'div', 'wa-actions');
         if (picked != null && picked !== q.query.index) actions.append(button('以选中的节点为查询', () => runQuery(f.ids[picked]), true));
-        actions.append(button('回到全景', () => { state.view = 'panorama'; renderHead(); renderSide(); schedule(); }));
+        actions.append(button('回到全景', () => switchView('panorama')));
         headBox.append(actions);
 
         const where = section('这一段在半圆上的位置');
