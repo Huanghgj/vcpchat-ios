@@ -392,13 +392,13 @@ struct TopicDraft: Codable, Sendable {
     func detach(_ id: String) async {
         room?.attachments.removeAll { $0.id == id }; await flushDraft()
     }
-    func send() {
-        guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return }
-        guard let room, let topic = activeTopic, !room.busy, (!room.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !room.attachments.isEmpty), let store else { return }
+    func send() -> Bool {
+        guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return false }
+        guard let room, let topic = activeTopic, !room.busy, (!room.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !room.attachments.isEmpty), let store else { return false }
         let content = room.draft
         let group = activeGroup
         let speakers = group.map { GroupRouting.speakers(group: $0, agents: agents, text: content, turn: topic.turnIndex) } ?? activeAgent.map { [$0] } ?? []
-        guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return }
+        guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return false }
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         room.busy = true; room.cancellation = nil; room.error = nil
@@ -442,6 +442,7 @@ struct TopicDraft: Codable, Sendable {
                 catch { self.error = error.localizedDescription }
             }
         }
+        return true
     }
     func receive(_ request: ChatRequest, into assistant: MessageViewModel, room: ChatRoom, store: ChatStore, prefix: String = "", reasoningPrefix: String = "", acceptedUser: String? = nil) async throws {
         if let cancellation = room.cancellation {

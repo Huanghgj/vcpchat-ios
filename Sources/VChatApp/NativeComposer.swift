@@ -10,19 +10,25 @@ struct NativeComposer: View {
     @Binding var text: String
     var enterSends: Bool
     var insertNewline: Int
+    var dismissKeyboard: Int
     var onSend: () -> Void
     var body: some View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty { Text("发消息").foregroundStyle(.secondary).padding(.top, 10).allowsHitTesting(false) }
+            #if os(iOS)
+            ComposerEditor(text: $text, enterSends: enterSends, insertNewline: insertNewline, dismissKeyboard: dismissKeyboard, onSend: onSend)
+                .fixedSize(horizontal: false, vertical: true)
+            #else
             ComposerEditor(text: $text, enterSends: enterSends, insertNewline: insertNewline, onSend: onSend)
                 .fixedSize(horizontal: false, vertical: true)
+            #endif
         }.frame(minHeight: 40).accessibilityLabel("发消息")
     }
 }
 #if os(iOS)
 private struct ComposerEditor: UIViewRepresentable {
     @Binding var text: String
-    var enterSends: Bool; var insertNewline: Int; var onSend: () -> Void
+    var enterSends: Bool; var insertNewline: Int; var dismissKeyboard: Int; var onSend: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView(); view.delegate = context.coordinator
@@ -30,11 +36,20 @@ private struct ComposerEditor: UIViewRepresentable {
         view.backgroundColor = .clear; view.textContainerInset = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
         view.textContainer.lineFragmentPadding = 0
         view.accessibilityLabel = "发消息"; view.isScrollEnabled = false
+        let toolbar = UIToolbar()
+        let hide = UIBarButtonItem(title: "收起键盘", style: .plain, target: view, action: #selector(UIResponder.resignFirstResponder))
+        toolbar.items = [UIBarButtonItem(systemItem: .flexibleSpace), hide]
+        toolbar.sizeToFit()
+        view.inputAccessoryView = toolbar
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
         context.coordinator.parent = self
         if view.text != text && view.markedTextRange == nil { view.text = text; view.invalidateIntrinsicContentSize() }
+        if context.coordinator.dismissal != dismissKeyboard {
+            context.coordinator.dismissal = dismissKeyboard
+            if view.isFirstResponder { view.resignFirstResponder() }
+        }
         let returnKey: UIReturnKeyType = enterSends ? .send : .default
         if view.returnKeyType != returnKey { view.returnKeyType = returnKey; view.reloadInputViews() }
         if context.coordinator.newline != insertNewline {
@@ -49,8 +64,8 @@ private struct ComposerEditor: UIViewRepresentable {
         return CGSize(width: width, height: min(maxHeight, max(40, measured.height)))
     }
     @MainActor final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: ComposerEditor; var newline: Int; var inserting = false
-        init(_ parent: ComposerEditor) { self.parent = parent; newline = parent.insertNewline }
+        var parent: ComposerEditor; var newline: Int; var dismissal: Int; var inserting = false
+        init(_ parent: ComposerEditor) { self.parent = parent; newline = parent.insertNewline; dismissal = parent.dismissKeyboard }
         func textViewDidChange(_ view: UITextView) { parent.text = view.text; view.invalidateIntrinsicContentSize() }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             if text == "\n" && parent.enterSends && !inserting && view.markedTextRange == nil { parent.onSend(); return false }
