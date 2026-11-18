@@ -16,11 +16,11 @@ struct ChatView: View {
     @State private var exporting = false
     @State private var exportDocument = TextExportDocument()
     @State private var newlineRequest = 0
-    @State private var dismissKeyboardRequest = 0
+    @State private var keyboard = ComposerKeyboard()
 
     private func sendDraft() {
-        guard !model.loading, model.send() else { return }
-        dismissKeyboardRequest += 1
+        guard !model.loading else { return }
+        keyboard.submit(model.send)
     }
     @State private var creatingTopic = false
     var body: some View {
@@ -39,7 +39,7 @@ struct ChatView: View {
                 if let room = model.room, !room.attachments.isEmpty { AttachmentStrip(attachments: room.attachments) { id in Task { await model.detach(id) } }.padding(.horizontal, 16).padding(.bottom, 6) }
                 HStack(alignment: .bottom, spacing: 8) {
                     AttachmentComposer(model: model)
-                    NativeComposer(text: $model.draft, enterSends: model.inputPreferences.enterSends, insertNewline: newlineRequest, dismissKeyboard: dismissKeyboardRequest, onSend: sendDraft)
+                    NativeComposer(text: $model.draft, enterSends: model.inputPreferences.enterSends, insertNewline: newlineRequest, keyboard: keyboard, onSend: sendDraft)
                     if model.inputPreferences.enterSends { Button { newlineRequest += 1 } label: { Image(systemName: "return").frame(width: 32, height: 40) }.accessibilityLabel("换行") }
                     if model.busy { Button { Task { await model.stop() } } label: { Image(systemName: "stop.fill").frame(width: 40, height: 40) }.accessibilityLabel("停止生成") }
                     else { Button { sendDraft() } label: { Image(systemName: "arrow.up").fontWeight(.semibold).frame(width: 40, height: 40).background(model.appearance.theme.tint, in: Circle()).foregroundStyle(model.appearance.theme == .paper ? .white : .black) }.disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (model.room?.attachments.isEmpty ?? true) || model.loading).accessibilityLabel("发送消息") }
