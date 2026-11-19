@@ -41,7 +41,7 @@ final class PhoneInteractionTests: XCTestCase {
         return (root, try await ChatStore.open(path: root.appendingPathComponent("chat.sqlite").path))
     }
 
-    private func addMediaTopic(_ db: ChatStore, ownerID: String = "fixture") async throws -> ChatTopic {
+    @MainActor private func addMediaTopic(_ db: ChatStore, ownerID: String = "fixture") async throws -> ChatTopic {
         let topic = ChatTopic(ownerId: ownerID)
         try await db.put(topic, kind: "topic", id: topic.id)
         return topic
