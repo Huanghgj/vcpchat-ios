@@ -5,31 +5,74 @@ import UIKit
 import AppKit
 #endif
 
+/// Both send controls dismiss the same editor, only after the chat accepts the draft.
+@MainActor final class ComposerKeyboard {
+    #if os(iOS)
+    fileprivate weak var editor: UITextView?
+    #endif
+
+    func submit(_ accept: () -> Bool) {
+        guard accept() else { return }
+        #if os(iOS)
+        editor?.resignFirstResponder()
+        #endif
+    }
+}
+
 /// Native text editing keeps IME composition, selection and the insertion cursor intact.
 struct NativeComposer: View {
     @Binding var text: String
     var enterSends: Bool
     var insertNewline: Int
+    let keyboard: ComposerKeyboard
     var onSend: () -> Void
     var body: some View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty { Text("发消息").foregroundStyle(.secondary).padding(.top, 10).allowsHitTesting(false) }
+            #if os(iOS)
+            ComposerEditor(text: $text, enterSends: enterSends, insertNewline: insertNewline, keyboard: keyboard, onSend: onSend)
+                .fixedSize(horizontal: false, vertical: true)
+            #else
             ComposerEditor(text: $text, enterSends: enterSends, insertNewline: insertNewline, onSend: onSend)
                 .fixedSize(horizontal: false, vertical: true)
+            #endif
         }.frame(minHeight: 40).accessibilityLabel("发消息")
     }
 }
 #if os(iOS)
+/// Some keyboard paths call insertText directly; others ask the editing delegate.
+@MainActor private final class ComposerTextView: UITextView {
+    var handleReturn: ((UITextView) -> Bool)?
+    private(set) var forwardingInsertion = false
+
+    override func insertText(_ text: String) {
+        if text == "\n", handleReturn?(self) == true { return }
+        forwardingInsertion = true
+        defer { forwardingInsertion = false }
+        super.insertText(text)
+    }
+}
+
 private struct ComposerEditor: UIViewRepresentable {
     @Binding var text: String
-    var enterSends: Bool; var insertNewline: Int; var onSend: () -> Void
+    var enterSends: Bool; var insertNewline: Int; let keyboard: ComposerKeyboard; var onSend: () -> Void
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> UITextView {
-        let view = UITextView(); view.delegate = context.coordinator
+        let view = ComposerTextView()
+        view.delegate = context.coordinator
+        view.handleReturn = { [weak coordinator = context.coordinator] editor in
+            coordinator?.handleReturn(editor) == true
+        }
+        keyboard.editor = view
         view.font = .preferredFont(forTextStyle: .body); view.adjustsFontForContentSizeCategory = true
         view.backgroundColor = .clear; view.textContainerInset = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
         view.textContainer.lineFragmentPadding = 0
         view.accessibilityLabel = "发消息"; view.isScrollEnabled = false
+        let toolbar = UIToolbar()
+        let hide = UIBarButtonItem(title: "收起键盘", style: .plain, target: view, action: #selector(UIResponder.resignFirstResponder))
+        toolbar.items = [UIBarButtonItem(systemItem: .flexibleSpace), hide]
+        toolbar.sizeToFit()
+        view.inputAccessoryView = toolbar
         return view
     }
     func updateUIView(_ view: UITextView, context: Context) {
@@ -52,8 +95,16 @@ private struct ComposerEditor: UIViewRepresentable {
         var parent: ComposerEditor; var newline: Int; var inserting = false
         init(_ parent: ComposerEditor) { self.parent = parent; newline = parent.insertNewline }
         func textViewDidChange(_ view: UITextView) { parent.text = view.text; view.invalidateIntrinsicContentSize() }
+        func handleReturn(_ view: UITextView) -> Bool {
+            guard parent.enterSends, !inserting, view.markedTextRange == nil else { return false }
+            if parent.text != view.text { parent.text = view.text }
+            parent.onSend()
+            return true
+        }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            if text == "\n" && parent.enterSends && !inserting && view.markedTextRange == nil { parent.onSend(); return false }
+            if text == "\n", (view as? ComposerTextView)?.forwardingInsertion != true {
+                return !handleReturn(view)
+            }
             return true
         }
     }
