@@ -14,8 +14,8 @@ struct VCPCardView: View {
                     ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
                         switch part {
                         case .summary(let items, let done): ToolSummary(items:items, closed:done)
-                        case .result(let result, let done): resultCard(result, closed:done, plain:true)
-                        case .note(let text): Text(verbatim:text).font(.callout).modifier(MessageTextSelection())
+                        case .result(let result, let done): resultCard(result, closed:done, receipt:true)
+                        case .note(let text): RichMessageBody(receipt: text, options: options).font(.callout)
                         }
                     }
                 }
@@ -26,7 +26,7 @@ struct VCPCardView: View {
         case .tool(let name, let command, let body, let closed):
             FoldedCard(title: name, icon: "wrench.and.screwdriver", subtitle: closed ? command : "输入中 · " + command, initiallyOpen: !closed,motion: options.motion) { Text(verbatim: body).font(.callout.monospaced()).modifier(MessageTextSelection()).frame(maxWidth: .infinity, alignment: .leading) }
         case .result(let result, let closed):
-            resultCard(result, closed:closed, plain:false)
+            resultCard(result, closed:closed, receipt:false)
         case .diary(let entry, let closed):
             VStack(alignment: .leading, spacing: 10) {
                 HStack { Label(entry.update ? "日记修改" : entry.title, systemImage: "book.closed").font(.headline); Spacer(); Text(closed ? entry.date : "写入中").font(.caption).foregroundStyle(.secondary) }
@@ -50,7 +50,7 @@ struct VCPCardView: View {
             FoldedCard(title: "桌面推送", icon: "desktopcomputer", subtitle: closed ? "仅展示，不执行" : "接收中", initiallyOpen: false,motion: options.motion) { Text(verbatim: text).font(.callout.monospaced()).modifier(MessageTextSelection()) }
         }
     }
-    @ViewBuilder private func resultCard(_ result: VCPMarkup.Result, closed: Bool, plain: Bool) -> some View {
+    @ViewBuilder private func resultCard(_ result: VCPMarkup.Result, closed: Bool, receipt: Bool) -> some View {
         let title = result.tool.isEmpty ? "工具结果" : result.tool
         let icon = result.ok == false ? "exclamationmark.triangle" : "checkmark.circle"
         if result.fields.isEmpty && result.content.isEmpty {
@@ -63,11 +63,12 @@ struct VCPCardView: View {
                     ForEach(Array(result.fields.enumerated()), id: \.offset) { _, field in
                         VStack(alignment:.leading,spacing:3) {
                             Text(field.key).font(.caption).foregroundStyle(.secondary)
-                            Text(verbatim:field.value).modifier(MessageTextSelection())
+                            if receipt { RichMessageBody(receipt: field.value, options: options) }
+                            else { Text(verbatim:field.value).modifier(MessageTextSelection()) }
                         }
                     }
                     if !result.content.isEmpty {
-                        if plain { Text(verbatim:result.content).modifier(MessageTextSelection()) }
+                        if receipt { RichMessageBody(receipt: result.content, options: options) }
                         else { RichMessageBody(result.content, options:options) }
                     }
                 }.frame(maxWidth:.infinity,alignment:.leading)

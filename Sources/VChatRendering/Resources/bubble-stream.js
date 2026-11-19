@@ -4,6 +4,18 @@
     mount.dataset.vcpIslandHost = '';
     document.body.appendChild(mount);
     let previousChildren = [];
+    // Scoped to this bubble: following frames must not switch an image back to the cache URL.
+    const directImages = new Set();
+    const cacheURL = source => 'vchat-image://asset?' + encodeURIComponent(source);
+    function displayDirect(source) {
+        if (!/^https:\/\//i.test(source)) return;
+        const pendingURL = cacheURL(source);
+        for (const img of mount.querySelectorAll('img[src]')) {
+            if (img.getAttribute('src') !== pendingURL) continue;
+            directImages.add(source);
+            img.setAttribute('src', source);
+        }
+    }
     function sealedRoot(source) {
         // Desktop V5 starts animations only after the outer div is sealed. A
         // closing div inside a script, comment, quoted attribute or style is not a seal.
@@ -65,8 +77,8 @@
             } catch { /* A relative source may still be a valid sticker. */ }
             if (/^https:\/\//i.test(src) || relativeSticker) {
                 // Keep responsive images native to WebKit when the author supplies a srcset.
-                if (!img.hasAttribute('srcset') && !img.closest('picture'))
-                    img.setAttribute('src', 'vchat-image://asset?' + encodeURIComponent(src));
+                if (!directImages.has(src) && !img.hasAttribute('srcset') && !img.closest('picture'))
+                    img.setAttribute('src', cacheURL(src));
             }
         }
         // Keep live state (e.g. a canvas or a counter mutated by an early
@@ -119,6 +131,7 @@
         if (!streaming && !lifecycleDelivered) { pageLifecycle(true); lifecycleDelivered = true; }
     }
     window.VCPBubbleStream = {
+        displayDirect,
         update(source,streaming,requestEpoch) {
             if (requestEpoch !== epoch) return;
             pending = {source,streaming};

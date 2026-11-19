@@ -188,3 +188,45 @@ public actor MessageRenderer {
         return spans
     }
 }
+
+extension MessageRenderer {
+    /// Tool receipts are data: promote image nodes only, preserving all other source verbatim.
+    func receiptBlocks(_ source: String, media: Bool) throws -> [RenderBlock] {
+        guard media, source.contains("![") || source.localizedCaseInsensitiveContains("<img") else { return [.literal(source)] }
+        let bytes = Array(source.utf8)
+        var starts = [0]
+        for i in bytes.indices where bytes[i] == 10 || (bytes[i] == 13 && (i + 1 == bytes.count || bytes[i + 1] != 10)) {
+            starts.append(i + 1)
+        }
+        func offset(_ location: SourceLocation) -> Int? {
+            guard location.column > 0, starts.indices.contains(location.line - 1) else { return nil }
+            let value = starts[location.line - 1] + location.column - 1
+            return value <= bytes.count ? value : nil
+        }
+        var cursor = 0, blocks: [RenderBlock] = []
+        func appendText(until end: Int) {
+            if cursor < end { blocks.append(.literal(String(decoding: bytes[cursor..<end], as: UTF8.self))) }
+        }
+        func visit(_ node: any Markup) throws {
+            try Task.checkCancellation()
+            let image: MessageMedia?
+            switch node {
+            case let n as Markdown.Image: image = MessageMedia(source: n.source ?? "", caption: n.plainText)
+            case let n as InlineHTML: image = MessageMedia.html(n.rawHTML)
+            case let n as HTMLBlock: image = MessageMedia.html(n.rawHTML)
+            default:
+                for child in node.children { try visit(child) }
+                return
+            }
+            guard let image, image.kind == "image", let range = node.range,
+                  let start = offset(range.lowerBound), let end = offset(range.upperBound),
+                  start >= cursor, end > start else { return }
+            appendText(until: start)
+            blocks.append(.paragraph([.media(image)]))
+            cursor = end
+        }
+        try visit(Document(parsing: source))
+        appendText(until: bytes.count)
+        return blocks
+    }
+}

@@ -92,7 +92,7 @@ private struct RenderingSettings: View {
     @State private var updatingStickers = false
     @State private var mediaNotice = ""
     private func updateStickers(_ file: URL? = nil) {
-        guard !updatingStickers, let origin=model.currentImageOrigin else { return }
+        guard !updatingStickers, let origin=model.stickerDeployment else { return }
         updatingStickers=true
         Task {
             defer { updatingStickers=false }
@@ -100,8 +100,8 @@ private struct RenderingSettings: View {
                 let catalog: EmoticonCatalog
                 if let file { catalog=try await StickerDirectories.shared.importFile(file,for:origin) }
                 else { catalog=try await StickerDirectories.shared.refresh(origin:origin,username:model.services.adminUsername,password:model.serviceSecrets[.adminPassword] ?? "") }
-                guard model.currentImageOrigin==origin else { return }
-                model.stickerOrigin=origin;model.stickerCatalog=catalog;mediaNotice="已更新表情目录"
+                guard model.stickerDeployment==origin else { return }
+                model.catalogDeployment=origin;model.stickerCatalog=catalog;mediaNotice="已更新表情目录"
             } catch { mediaNotice=error.localizedDescription }
         }
     }
@@ -139,8 +139,8 @@ private struct RenderingSettings: View {
                     Text("图片与表情包").font(.headline)
                     Text("下载过的图片可在本机复用。更新目录后，自动纠正回复里的表情包名、文件名和扩展名。").font(.caption)
                     Text("本服务器目录：\(model.stickers.catalog?.count ?? 0) 张")
-                    Button("从当前 VCP 更新目录") { updateStickers() }.disabled(updatingStickers || model.currentImageOrigin == nil)
-                    Button("导入表情目录 JSON") { importingStickers=true }.disabled(updatingStickers || model.currentImageOrigin == nil)
+                    Button("从当前 VCP 更新目录") { updateStickers() }.disabled(updatingStickers || model.stickerDeployment == nil)
+                    Button("导入表情目录 JSON") { importingStickers=true }.disabled(updatingStickers || model.stickerDeployment == nil)
                     Button("清除聊天图片缓存") { Task { await NativeMediaLoader.shared.clearImageCache(); mediaNotice="聊天图片缓存已清除" } }
                     if !mediaNotice.isEmpty { Text(mediaNotice).font(.caption).accessibilityLabel(mediaNotice) }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(18).workspaceGlass(palette)

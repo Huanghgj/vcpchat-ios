@@ -29,6 +29,12 @@ import WebKit
                 urlSchemeTask.didReceive(URLResponse(url:locator,mimeType:value.mime,expectedContentLength:value.data.count,textEncodingName:nil))
                 urlSchemeTask.didReceive(value.data);urlSchemeTask.didFinish()
             } catch {
+                if error is RemoteImageStore.DirectWebImage, !Task.isCancelled, tasks[id] != nil,
+                   raw.lowercased().hasPrefix("https://"), MessageMedia.isSafe(raw) {
+                    // Return only the author-supplied URL, never a resolved File Key, to the isolated renderer.
+                    _ = try? await webView.callAsyncJavaScript("window.VCPBubbleStream?.displayDirect(source)",
+                        arguments: ["source": raw], in: nil, contentWorld: .defaultClient)
+                }
                 guard !Task.isCancelled,tasks.removeValue(forKey:id) != nil else { return }
                 urlSchemeTask.didFailWithError(URLError(.resourceUnavailable))
             }

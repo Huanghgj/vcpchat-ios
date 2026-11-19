@@ -41,6 +41,85 @@ final class PhoneInteractionTests: XCTestCase {
         return shell ? "<<<[ROLE_DIVIDE_USER]>>>\n"+source+"\n<<<[END_ROLE_DIVIDE_USER]>>>" : source
     }
 
+    @MainActor func testStickerDirectoryAndImagesHonorDeploymentPrefix() throws {
+        let model = ChatViewModel()
+        for suffix in ["", "/v1", "/v1/chat/completions", "/v1/chatvcp/completions"] {
+            model.configuration.server = "https://fixture.invalid/team/vcp" + suffix
+            let base = try XCTUnwrap(model.stickerDeployment)
+            XCTAssertEqual(base.appendingPathComponent("admin_api/emojis/list").absoluteString,
+                           "https://fixture.invalid/team/vcp/admin_api/emojis/list")
+            let context = StickerContext(server: base, fileKey: "fixture", catalog: nil)
+            let image = try XCTUnwrap(context.resolve("images/猫表情包/笑.png"))
+            XCTAssertEqual(image.path, "/team/vcp/pw=fixture/images/猫表情包/笑.png")
+        }
+    }
+
+    func testLegacyTailStylesAndScriptsRemainInsideTheirCard() {
+        let root = #"<div id="vcp-root">card</div>"#
+        let tail = root + "\n<style>.card{color:red}</style>\n<script>window.ready=true</script><STYLE>.second{}</STYLE>"
+        XCTAssertEqual(HTMLIslandPolicy.extractSections(from: tail + "\n后面的正文"),
+                       [.island(tail), .markdown("\n后面的正文")])
+        let second = "<style>.second{color:blue}</style>" + root
+        XCTAssertEqual(HTMLIslandPolicy.extractSections(from: root + second), [.island(root), .island(second)])
+        XCTAssertEqual(HTMLIslandPolicy.extractSections(from: root + "\n正文<style>.other{}</style>"),
+                       [.island(root), .markdown("\n正文<style>.other{}</style>")])
+    }
+
+    func testReceiptPromotesOnlyRealImageNodesAndKeepsOtherBytes() async throws {
+        let png = "https://fixture.invalid/image(2).png"
+        let example = "`![示例](https://fixture.invalid/not-an-image.png)`"
+        let prefix = "🌿 生成完毕：", suffix = "\n" + example + "\n\n<script>sample()</script>\n<<<[ROLE_DIVIDE_USER]>>>"
+        let content = prefix + "![成品](" + png + ")" + suffix
+        let receipt = "[[VCP调用结果信息汇总:\n工具名称: 生图\n返回内容: " + content + "\nVCP调用结果结束]]"
+        let rendered = try await MessageRenderer.shared.render(batch(receipt, id: receiptID), options: .init(), dark: false)
+        guard case .vcp(.batch(let parts, true)) = rendered.first, case .result(let result, true) = parts.first else {
+            return XCTFail("batch lost its tool receipt")
+        }
+        let blocks = try await MessageRenderer.shared.receiptBlocks(result.content, media: true)
+        XCTAssertEqual(blocks, [.literal(prefix), .paragraph([.media(try XCTUnwrap(MessageMedia(source: png, caption: "成品")))]), .literal(suffix)])
+        let disabled = try await MessageRenderer.shared.receiptBlocks(result.content, media: false)
+        XCTAssertEqual(disabled, [.literal(content)])
+    }
+
+    @MainActor func testIslandDelegatesRedirectAndSVGToWebKitWithoutCachingOrRetrying() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let origin = ImageOriginFixture()
+        let redirect = try XCTUnwrap(URL(string: "https://fixture.invalid/cdn"))
+        let svg = try XCTUnwrap(URL(string: "https://fixture.invalid/vector"))
+        await origin.set(redirect, Data(), status: 302)
+        await origin.set(svg, Data("<svg/>".utf8), type: "image/svg+xml; charset=utf-8")
+        let handler = IslandImageScheme(store: RemoteImageStore(directory: dir) { try await origin.get($0) })
+        handler.mediaEnabled = true
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.setURLSchemeHandler(handler, forURLScheme: IslandImageScheme.name)
+        config.userContentController.addUserScript(WKUserScript(source: try XCTUnwrap(IslandScripts.runtime),
+            injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
+        let web = WKWebView(frame: .zero, configuration: config)
+        let window = try host(SchemeImageFixture(view: web))
+        defer { web.stopLoading(); handler.invalidate(); window.isHidden = true }
+        web.loadHTMLString(HTMLIslandPolicy.document("", motion: false, media: true, dark: false), baseURL: nil)
+        try await eventually("fixture page is ready") { !web.isLoading && web.url != nil }
+        let card = "<div id='vcp-root'><img id='a' src='\(redirect)'><img id='b' src='\(svg)'></div>"
+        func update(_ html: String) async throws {
+            _ = try await web.callAsyncJavaScript("window.VCPBubbleStream.update(html,false,window.VCPBubbleEpoch); return true",
+                arguments: ["html": html], in: nil, contentWorld: .defaultClient)
+        }
+        try await update(card)
+        let restored = """
+        return document.querySelector('#a')?.getAttribute('src') === '\(redirect)' &&
+               document.querySelector('#b')?.getAttribute('src') === '\(svg)';
+        """
+        guard try await observeIsland(web, "original HTTPS URLs returned to WebKit", condition: restored) else { return }
+        try await update(card + "<p>next</p>")
+        _ = try await observeIsland(web, "next frame keeps the direct URLs", condition: restored)
+        for url in [redirect, svg] {
+            let n = await origin.count(url)
+            XCTAssertEqual(n, 1)
+        }
+    }
+
     func testToolBatchHidesOnlyItsTransportAndKeepsSummaryAndImage() async throws {
         let tool = "<<<[TOOL_REQUEST]>>>\ntool_name:「始」NovelAIGen「末」\n<<<[END_TOOL_REQUEST]>>>"
         let summary = "[本轮工具调用摘要:]\nNovelAIGen 调用成功。\n[本轮工具调用摘要结束]"
@@ -765,8 +844,8 @@ private struct KeyboardFixture: View {
 private actor ImageOriginFixture {
     private var requests: [URL:Int] = [:]
     private var replies: [URL:RemoteImageReply] = [:]
-    func set(_ url: URL, _ data: Data, status: Int = 200, control: String = "") {
-        replies[url] = RemoteImageReply(data: data, status: status, cacheControl: control)
+    func set(_ url: URL, _ data: Data, status: Int = 200, control: String = "", type: String = "") {
+        replies[url] = RemoteImageReply(data: data, status: status, cacheControl: control, contentType: type)
     }
     func count(_ url: URL) -> Int { requests[url, default: 0] }
     func get(_ url: URL) async throws -> RemoteImageReply {

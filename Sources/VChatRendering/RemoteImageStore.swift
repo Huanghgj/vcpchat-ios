@@ -8,6 +8,7 @@ struct RemoteImageReply: Sendable {
     let data: Data
     let status: Int
     let cacheControl: String
+    var contentType: String = ""
 }
 struct CachedRemoteImage: Sendable {
     let data: Data
@@ -18,12 +19,18 @@ struct CachedRemoteImage: Sendable {
 /// Encoded image bytes, shared by native messages and the isolated HTML renderer.
 /// The filename is a digest of the *whole* URL, including its access path and query.
 actor RemoteImageStore {
+    /// A WebKit image can display these directly, without putting them in the raster cache.
+    enum DirectWebImage: LocalizedError {
+        case redirect, svg
+        var errorDescription: String? { "请用原链接查看这张图片" }
+    }
+
     static let shared: RemoteImageStore = {
         let http = VCPHTTP(allowingRedirects: false)
         return RemoteImageStore(directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VChat-MessageImages-v1", isDirectory: true)) { url in
             let r = try await http.response(url, limit: 20_000_000)
-            return RemoteImageReply(data: r.data, status: r.status, cacheControl: r.cacheControl)
+            return RemoteImageReply(data: r.data, status: r.status, cacheControl: r.cacheControl, contentType: r.contentType)
         }
     }()
 
@@ -56,8 +63,15 @@ actor RemoteImageStore {
             defer { if generation == own { pending[id] = nil } }
             let reply = try await fetch(canonical)
             try Task.checkCancellation()
+            if [301, 302, 303, 307, 308].contains(reply.status) { throw DirectWebImage.redirect }
             guard reply.status == 200 else { throw ClientError.http(reply.status) }
-            guard let mime = Self.imageType(reply.data) else { throw ClientError.server("响应不是可显示的图片") }
+            if reply.contentType.split(separator: ";").first?.trimmingCharacters(in: .whitespaces).lowercased() == "image/svg+xml" {
+                throw DirectWebImage.svg
+            }
+            guard let mime = Self.imageType(reply.data) else {
+                if canonical.pathExtension.lowercased() == "svg" { throw DirectWebImage.svg }
+                throw ClientError.server("响应不是可显示的图片")
+            }
             let expires = Date().addingTimeInterval(Self.lifetime(reply.cacheControl, url:canonical))
             let value = CachedRemoteImage(data: reply.data, mime: mime, expires: expires)
             if own == generation && expires > Date() { write(value, file: file) }

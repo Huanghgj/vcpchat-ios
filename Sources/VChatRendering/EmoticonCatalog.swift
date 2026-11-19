@@ -103,7 +103,7 @@ public struct StickerContext: Sendable, Equatable {
     private let fileKey: String
     public let catalog: EmoticonCatalog?
     public init(server: URL? = nil, fileKey: String = "", catalog: EmoticonCatalog? = nil) {
-        self.server=server; self.fileKey=fileKey; self.catalog=catalog
+        self.server=StickerDirectories.deploymentBase(server); self.fileKey=fileKey; self.catalog=catalog
     }
     func resolve(_ source: String) -> URL? {
         guard var url=URL(string:source) else { return nil }
@@ -111,20 +111,26 @@ public struct StickerContext: Sendable, Equatable {
               var root=URLComponents(url:server,resolvingAgainstBaseURL:false), let host=root.host else {
             return MessageMedia.isSafe(source) ? url : nil
         }
-        let parts=url.pathComponents
+        let prefix = root.percentEncodedPath
         if url.scheme == nil {
             guard url.host == nil, !source.hasPrefix("//"), !fileKey.isEmpty, MessageMedia.relativeSticker(source) else { return nil }
             root.query=nil;root.fragment=nil
-            root.percentEncodedPath="/pw=" + EmoticonCatalog.encode(fileKey) + "/images/" + EmoticonCatalog.encode(pair.pack) + "/" + EmoticonCatalog.encode(pair.file)
+            root.percentEncodedPath=prefix + "/pw=" + EmoticonCatalog.encode(fileKey) + "/images/" + EmoticonCatalog.encode(pair.pack) + "/" + EmoticonCatalog.encode(pair.file)
             guard let absolute=root.url else { return nil };url=absolute
         } else {
             guard MessageMedia.isSafe(source) else { return nil }
             guard url.host?.lowercased() == host.lowercased() else { return url }
-            // VCP sometimes publishes its backend port behind a same-host HTTPS reverse proxy.
-            // Never carry a source credential to another host or downgrade TLS.
-            if url.scheme == "https",root.scheme == "https",url.port == 6005,(root.port == nil || root.port == 443),
-               parts.count == 5,parts[1].hasPrefix("pw="),parts[2]=="images",
-               var c=URLComponents(url:url,resolvingAgainstBaseURL:false) { c.port=root.port;url=c.url ?? url }
+            guard var c=URLComponents(url:url,resolvingAgainstBaseURL:false) else { return url }
+            let path = c.percentEncodedPath
+            let scoped = path.hasPrefix(prefix + "/")
+            let suffix = scoped ? String(path.dropFirst(prefix.count)) : path
+            let segments = suffix.split(separator: "/")
+            // A desktop backend may emit its unprefixed :6005 image route behind the configured proxy.
+            if url.scheme == "https", root.scheme == "https", url.port == 6005, (root.port == nil || root.port == 443),
+               segments.count == 4, segments[0].hasPrefix("pw="), segments[1] == "images" {
+                c.port = root.port; c.percentEncodedPath = prefix + suffix
+                url = c.url ?? url
+            } else if !scoped { return url } // Other deployments on the same host use different catalogs.
             guard url.scheme?.lowercased()==root.scheme?.lowercased(),
                   (url.port ?? (url.scheme=="https" ? 443 : 80)) == (root.port ?? (root.scheme=="https" ? 443 : 80)) else { return url }
         }
@@ -139,10 +145,11 @@ public extension EnvironmentValues {
 public actor StickerDirectories {
     public static let shared = StickerDirectories()
     private let http = VCPHTTP(allowingRedirects: false)
-    public static func origin(_ server: URL?) -> URL? {
-        guard let server, var c=URLComponents(url:server,resolvingAgainstBaseURL:false),
-              c.user == nil, c.password == nil, c.host != nil, ["http","https"].contains(c.scheme) else { return nil }
-        c.path = ""; c.query=nil;c.fragment=nil
+    public static func deploymentBase(_ server: URL?) -> URL? {
+        guard let server,
+              let base = try? ConnectionConfiguration(server: server.absoluteString).endpoint(""),
+              var c = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
+        while c.percentEncodedPath.hasSuffix("/") { c.percentEncodedPath.removeLast() }
         return c.url
     }
     private func file(_ origin: URL) throws -> URL {
@@ -164,7 +171,7 @@ public actor StickerDirectories {
         return catalog
     }
     public func refresh(origin: URL, username: String, password: String) async throws -> EmoticonCatalog {
-        guard Self.origin(origin)==origin, !username.isEmpty, !password.isEmpty else {
+        guard Self.deploymentBase(origin)==origin, !username.isEmpty, !password.isEmpty else {
             throw ClientError.server("请在“身份与日记”配置管理员账号，或导入桌面表情目录。")
         }
         let header="Basic "+Data((username+":"+password).utf8).base64EncodedString()

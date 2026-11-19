@@ -85,7 +85,7 @@ public enum HTMLIslandPolicy {
             // Balance <div> depth starting from after this root div opening tag
             let divOpenEnd = NSMaxRange(m.range)
             let divEnd = balanceDiv(in: s, from: divOpenEnd)
-            let islandEnd = attachedScriptsEnd(in: s, from: divEnd)
+            let islandEnd = attachedAssetsEnd(in: s, from: divEnd)
             if !explicit {
                 guard islandEnd-divStart <= 256*1024 else { continue }
                 let card=s.substring(with:NSRange(location: divStart,length:islandEnd-divStart))
@@ -176,15 +176,28 @@ public enum HTMLIslandPolicy {
         return s.length
     }
 
-    private static let trailingScript = try! NSRegularExpression(
-        pattern: #"(?is)\s*<script\b[^>]*>.*?</script\s*>"#
+    private static let trailingAsset = try! NSRegularExpression(
+        pattern: #"(?is)\s*<(script|style)(?=[\s>])(?:"[^"]*"|'[^']*'|[^'">])*>.*?</\1\s*>"#
     )
-    private static func attachedScriptsEnd(in text: NSString, from start: Int) -> Int {
+    private static func attachedAssetsEnd(in text: NSString, from start: Int) -> Int {
         var end = start
+        var stylePrefix: Int?
         while end < text.length,
-              let match = trailingScript.firstMatch(in: text as String, options: .anchored,
-                                                    range: NSRange(location: end, length: text.length - end)) {
+              let match = trailingAsset.firstMatch(in: text as String, options: .anchored,
+                                                   range: NSRange(location: end, length: text.length - end)) {
+            if text.substring(with: match.range(at: 1)).lowercased() == "style" {
+                stylePrefix = stylePrefix ?? end
+            } else { stylePrefix = nil }
             end = NSMaxRange(match.range)
+        }
+        // Styles immediately before the next card belonged to that card before tail assets were supported.
+        if let stylePrefix, end < text.length {
+            let rest = NSRange(location: end, length: text.length - end)
+            let next = text.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.inverted, range: rest).location
+            if next != NSNotFound, let tag = openingDiv.firstMatch(in: text as String, options: .anchored,
+                range: NSRange(location: next, length: text.length - next)), accepts(text.substring(with: tag.range)) {
+                return stylePrefix
+            }
         }
         return end
     }
@@ -200,7 +213,7 @@ public enum HTMLIslandPolicy {
     }
 }
 
-private enum IslandScripts {
+enum IslandScripts {
     static let runtime: String? = load(["marked.min", "morphdom.min", "bubble-markdown", "bubble-stream"])
     static func load(_ names: [String]) -> String? {
         var scripts: [String] = []

@@ -70,11 +70,11 @@ struct TopicDraft: Codable, Sendable {
     var profile = UserProfile()
     var renderOptions = RenderOptions()
     var stickerCatalog: EmoticonCatalog?
-    var stickerOrigin: URL?
-    var currentImageOrigin: URL? { StickerDirectories.origin(try? configuration.baseURL()) }
+    var catalogDeployment: URL?
+    var stickerDeployment: URL? { StickerDirectories.deploymentBase(try? configuration.baseURL()) }
     var stickers: StickerContext {
-        StickerContext(server: currentImageOrigin, fileKey: serviceSecrets[.fileKey] ?? "",
-                       catalog: stickerOrigin == currentImageOrigin ? stickerCatalog : nil)
+        StickerContext(server: stickerDeployment, fileKey: serviceSecrets[.fileKey] ?? "",
+                       catalog: catalogDeployment == stickerDeployment ? stickerCatalog : nil)
     }
     var appearance = AppearanceSettings()
     var inputPreferences = InputPreferences()
