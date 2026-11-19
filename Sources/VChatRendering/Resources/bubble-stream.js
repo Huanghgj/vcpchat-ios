@@ -54,6 +54,15 @@
             let decoded;
             try { decoded = decodeURIComponent(src); } catch { decoded = src; }
             const relativeSticker = !/^[a-z][a-z0-9+.-]*:/i.test(src) && decoded.includes('表情包') && !src.startsWith('//');
+            // A generated VCP photo often arrives with a thumbnail width in the tag.
+            // Expand only standalone service photos; preserve stickers and authored card layouts.
+            try {
+                const path = decodeURIComponent(new URL(src).pathname);
+                if (/^\/pw=[^/]+\/images\//.test(path) && !path.split('/').slice(-2, -1)[0]?.includes('表情包')
+                    && img.parentElement?.children.length === 1 && !img.closest('figure.icon,button,a,picture')) {
+                    img.classList.add('vcp-standalone-photo');
+                }
+            } catch { /* A relative source may still be a valid sticker. */ }
             if (/^https:\/\//i.test(src) || relativeSticker) {
                 // Keep responsive images native to WebKit when the author supplies a srcset.
                 if (!img.hasAttribute('srcset') && !img.closest('picture'))

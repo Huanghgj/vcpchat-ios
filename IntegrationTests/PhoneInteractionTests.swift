@@ -35,6 +35,86 @@ final class PhoneInteractionTests: XCTestCase {
         XCTFail("Timed out: " + description, file: file, line: line)
     }
 
+    private let receiptID = "2026-11-19T22:50:25.956+08:00"
+    private func batch(_ body: String, id: String, shell: Bool = true) -> String {
+        let source = "<<<[VCP_TOOL_BATCH_START:\(id)]>>>\n" + body + "\n<<<[VCP_TOOL_BATCH_END:\(id)]>>>"
+        return shell ? "<<<[ROLE_DIVIDE_USER]>>>\n"+source+"\n<<<[END_ROLE_DIVIDE_USER]>>>" : source
+    }
+
+    func testToolBatchHidesOnlyItsTransportAndKeepsSummaryAndImage() async throws {
+        let tool = "<<<[TOOL_REQUEST]>>>\ntool_name:「始」NovelAIGen「末」\n<<<[END_TOOL_REQUEST]>>>"
+        let summary = "[本轮工具调用摘要:]\nNovelAIGen 调用成功。\n[本轮工具调用摘要结束]"
+        let picture = "![生成图](https://fixtures.invalid/generated/portrait.png)"
+        let source = tool+"\n"+batch(summary,id:receiptID)+"\n"+picture
+        let blocks = try await MessageRenderer().render(source, options:.init(), dark:false)
+        XCTAssertEqual(blocks.count,3)
+        guard blocks.count==3,
+              case .vcp(.tool("NovelAIGen", _, _, true)) = blocks[0],
+              case .vcp(.batch(let receipts, true)) = blocks[1], receipts.count == 1,
+              case .summary(let lines,true) = receipts[0],
+              case .paragraph(let runs) = blocks[2] else { return XCTFail("Expected the tool, one receipt and the assistant's image") }
+        XCTAssertEqual(lines,["NovelAIGen 调用成功。"])
+        XCTAssertTrue(runs.contains { if case .media(let image)=$0 { return image.caption=="生成图" };return false })
+        XCTAssertFalse(SpeechText.plain(source).contains("VCP_TOOL_BATCH"))
+    }
+
+    func testBatchCloseMatchesIDAndToolPayloadStaysInert() {
+        let foreign = "<<<[VCP_TOOL_BATCH_END:wrong]>>>"
+        let literal = "<script>sample()</script>\n<<<[TOOL_REQUEST]>>>"
+        let result = "[[VCP调用结果信息汇总:\n工具名称: Example\n执行状态: 成功\n返回内容: ok\nVCP调用结果结束]]"
+        let full = batch(literal+"\n"+foreign+"\n"+result,id:receiptID,shell:false)+"\n正文"
+        let items=VCPMarkup.parse(full)
+        guard items.count==2,case .batch(let parts,true)=items[0],case .text(let after)=items[1] else { return XCTFail("Boundary mismatch") }
+        XCTAssertEqual(after.trimmingCharacters(in:.whitespacesAndNewlines),"正文")
+        XCTAssertTrue(parts.contains { if case .note(let note)=$0 { return note.contains(literal) && note.contains(foreign) };return false })
+        XCTAssertTrue(parts.contains { if case .result(let r,true)=$0 { return r.tool=="Example" && r.content=="ok" };return false })
+        let partial = "<<<[ROLE_DIVIDE_USER]>>>\n<<<[VCP_TOOL_BATCH_START:\(receiptID)]>>>\n等待\n<<<[VCP_TOOL_BATCH_EN"
+        XCTAssertEqual(VCPMarkup.parse(partial,streaming:true),[.batch([.note("等待")],false)])
+        XCTAssertEqual(VCPMarkup.parse(batch("",id:receiptID)),[])
+        let other = "<<<[ROLE_DIVIDE_USER]>>>你好<<<[END_ROLE_DIVIDE_USER]>>>"
+        XCTAssertEqual(VCPMarkup.parse(other),[.divider("user",false),.text("你好"),.divider("user",true)])
+    }
+
+    func testDocumentedBatchInMarkdownIsLiteral() async throws {
+        let sample=batch("演示",id:receiptID,shell:false)
+        let fence=String(repeating:"`",count:3)
+        let source=fence+"text\n"+sample+"\n"+fence+"\n\n"+batch("真的回执",id:receiptID,shell:false)
+        let blocks=try await MessageRenderer().render(source, options:.init(), dark:false)
+        guard blocks.count==2,case .code(_,let code,_)=blocks[0],
+              case .vcp(.batch(let parts,true))=blocks[1],parts == [.note("真的回执")] else { return XCTFail("Expected a code example and a separate receipt") }
+        XCTAssertTrue(code.contains(sample))
+        let inline = "`example <<<[VCP_TOOL_BATCH_START:sample]>>> text`"
+        XCTAssertEqual(VCPMarkup.parse(inline),[.text(inline)])
+    }
+
+    @MainActor func testStandaloneRoleMarkerCannotGrowIntoAnEmptyPanel() {
+        let content=VCPCardView(segment:.divider("user",false),options:.init())
+        let controller=UIHostingController(rootView:content)
+        let size=controller.sizeThatFits(in:CGSize(width:340,height:600))
+        XCTAssertGreaterThan(size.height,5)
+        XCTAssertLessThan(size.height,45)
+    }
+
+    @MainActor func testRemotePhotoFitsBubbleButStickerKeepsAuthoredWidth() throws {
+        let picture=try XCTUnwrap(MessageMedia.html(#"<img src="https://fixtures.invalid/pw=fixture/images/generated/portrait.png" width="110">"#))
+        let sticker=try XCTUnwrap(MessageMedia.html(#"<img src="https://fixtures.invalid/pw=fixture/images/测试表情包/笑.png" width="110">"#))
+        func measure(_ media: MessageMedia,_ pixels:CGSize,_ width:CGFloat) -> CGSize {
+            let layout=MessageImageLayout(pixels:pixels,widthLimit:media.inlineWidthLimit) { Color.red }
+            return UIHostingController(rootView:layout).sizeThatFits(in:CGSize(width:width,height:2000))
+        }
+        for width in [CGFloat(248),338] {
+            let size=measure(picture,CGSize(width:512,height:768),width)
+            XCTAssertEqual(size.width,width,accuracy:1)
+            XCTAssertEqual(size.height,width*1.5,accuracy:1)
+        }
+        let landscape=measure(picture,CGSize(width:1000,height:500),320)
+        XCTAssertEqual(landscape.height,160,accuracy:1)
+        XCTAssertEqual(measure(sticker,CGSize(width:512,height:512),320).width,110,accuracy:1)
+        let tall=measure(picture,CGSize(width:500,height:5000),338)
+        XCTAssertLessThanOrEqual(tall.height,721)
+        XCTAssertEqual(tall.width/tall.height,0.1,accuracy:0.002)
+    }
+
     @MainActor func testComposerManualDismissalAndSendDismissal() async throws {
         let state = KeyboardFixtureState()
         state.draft = ""

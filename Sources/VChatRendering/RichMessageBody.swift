@@ -9,6 +9,7 @@ import AppKit
 
 @MainActor @Observable private final class RenderState {
     var blocks: [RenderBlock] = []
+    var hasRendered = false
     var streaming = false
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var worker: Task<Void, Never>?
@@ -51,7 +52,7 @@ import AppKit
                 do {
                     let rendered = try await render(input)
                     if !Task.isCancelled && generation == id, pending == nil || input.streaming && pending?.streaming == true && pending?.source.hasPrefix(input.source) == true {
-                        blocks = rendered; streaming = input.streaming
+                        blocks = rendered; streaming = input.streaming; hasRendered = true
                     }
                     try await Task.sleep(for: .milliseconds(70))
                 } catch is CancellationError { break }
@@ -79,7 +80,7 @@ public struct RichMessageBody: View {
     public var body: some View {
         Group {
             if plain { Text(verbatim: source).modifier(MessageTextSelection()) }
-            else if rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
+            else if !rendering.hasRendered && rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
             else { NativeBlocks(blocks: rendering.blocks, options: options,streaming: rendering.streaming).equatable() }
         }
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)

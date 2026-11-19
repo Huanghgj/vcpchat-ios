@@ -27,7 +27,7 @@ public actor MessageRenderer {
         let source = options.media ? LooseImageTags.normalize(filtered) : filtered
         self.streaming = streaming
         var output: [RenderBlock] = []
-        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.localizedCaseInsensitiveContains("<div")) {
+        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.localizedCaseInsensitiveContains("<div"), streaming: streaming) {
             switch segment {
             case .text(let prose):
                 for section in HTMLIslandPolicy.extractSections(from: prose) {
