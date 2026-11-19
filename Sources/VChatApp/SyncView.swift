@@ -75,15 +75,17 @@ struct SyncView: View {
 extension ChatViewModel {
     func reloadSyncSource(_ p: SyncProfile) async {
         do {
-            guard let store else { return }; let all = try await store.syncSnapshot()
+            guard let store else { return }
             let prefix = "sync:\(p.id):"
             let oldIDs = Set(topics.filter { $0.ownerId.hasPrefix(prefix) }.map(\.id))
-            agents = all.agents; groups = all.groups; topics = all.topics
+            agents = try await store.records(VCPAgent.self, kind: "agent")
+            groups = try await store.records(VCPGroup.self, kind: "group")
+            try await reloadTopicList(from: store)
             topicStates = try await store.topicToolStates()
             let ids = oldIDs.union(topics.filter { $0.ownerId.hasPrefix(prefix) }.map(\.id))
             for (id,room) in rooms where ids.contains(id) || room.messages.contains(where: { $0.id.hasPrefix(prefix) }) { rooms.removeValue(forKey: id) }
             if let topic = topics.first(where: { $0.id == activeTopicID }) { await openTopic(topic) }
-            else if let topic = topics.first { await openTopic(topic) }
+            else if let topic = recentTopics(topics).first { await openTopic(topic) }
         } catch { self.error = "同步已保存，但刷新列表失败：\(error.localizedDescription)" }
     }
 }

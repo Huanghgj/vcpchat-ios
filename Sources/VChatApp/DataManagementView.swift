@@ -65,13 +65,13 @@ extension ChatViewModel {
         }
         let topic = ChatTopic(ownerId: owner.id)
         try await store.clearHistory(replacement: topic)
-        rooms = [:]; topics = [topic]; results = []; search = ""; await openTopic(topic)
+        rooms = [:]; topics = [topic]; lastMessageTimes = [:]; results = []; search = ""; await openTopic(topic)
     }
     func restoreHistory(_ id: String) async throws {
         guard !synchronizing,!rooms.values.contains(where: \.busy),let store else { throw ClientError.server("请先停止生成并等待同步结束") }
         synchronizing = true; defer { synchronizing = false }
         let restored = try await store.restoreHistoryCopy(id)
-        agents = try await store.records(VCPAgent.self,kind: "agent"); groups = try await store.records(VCPGroup.self,kind: "group"); topics = try await store.records(ChatTopic.self,kind: "topic")
+        agents = try await store.records(VCPAgent.self,kind: "agent"); groups = try await store.records(VCPGroup.self,kind: "group"); try await reloadTopicList(from: store)
         if let topic = restored.first { await flushDraft(); await openTopic(topic) }
     }
     func forgetCredentials() async throws {

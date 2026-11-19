@@ -53,7 +53,10 @@ public struct SyncProfile: Codable, Sendable, Equatable, Identifiable {
                 guard let owner = entities[identity.owner.key],owner.deletedAt == nil else { continue }
                 let rows = messages[identity.topicKey] ?? []; var t = ChatTopic(id: id,ownerType: identity.ownerType,ownerId: entityID(owner),title: d["name"].text.isEmpty ? "同步会话" : d["name"].text)
                 t.locked = d["locked"].bool; t.unread = d["unread"].bool; t.creator = d["_creator"]["agentName"].text.isEmpty ? nil : d["_creator"]["agentName"].text
-                t.createdAt = ((try? SyncWire.time(d["createdAt"])) ?? e.updatedAt)/1000; t.updatedAt = max(e.updatedAt,rows.map { $0["timestamp"].number ?? 0 }.max() ?? 0)/1000; out.topics.append(t)
+                // Some legacy topics have no creation clock. A metadata revision is not a conversation.
+                let firstUtterance = { rows.lazy.filter { ["user", "assistant"].contains($0["role"].text) }.compactMap { $0["timestamp"].number }.min() }
+                t.createdAt = ((try? SyncWire.integer(d["createdAt"])) ?? firstUtterance() ?? 0) / 1000
+                t.updatedAt = max(e.updatedAt,rows.map { $0["timestamp"].number ?? 0 }.max() ?? 0)/1000; out.topics.append(t)
                 for m in rows {
                     let mid = m["localId"].text.isEmpty ? localID("message",m["id"].text,owner: identity.topicKey) : m["localId"].text
                     let old = oldMessages[mid],role = m["role"].text

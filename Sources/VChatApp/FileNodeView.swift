@@ -124,7 +124,7 @@ extension ChatViewModel {
     func reloadTopicTools(changedID: String) async {
         do {
             guard let store else { return }
-            topics = try await store.records(ChatTopic.self,kind: "topic")
+            try await reloadTopicList(from: store)
             topicStates = try await store.topicToolStates()
             if let room = rooms[changedID] {
                 if room.busy { room.needsExternalReload = true }
