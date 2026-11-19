@@ -35,6 +35,364 @@ final class PhoneInteractionTests: XCTestCase {
         XCTFail("Timed out: " + description, file: file, line: line)
     }
 
+    @MainActor private func makeMediaDatabase() async throws -> (URL, ChatStore) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (root, try await ChatStore.open(path: root.appendingPathComponent("chat.sqlite").path))
+    }
+
+    private func addMediaTopic(_ db: ChatStore, ownerID: String = "fixture") async throws -> ChatTopic {
+        let topic = ChatTopic(ownerId: ownerID)
+        try await db.put(topic, kind: "topic", id: topic.id)
+        return topic
+    }
+
+    @MainActor func testTopicMediaSurvivesColdReopenAndDeletesOnlyLastReference() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try await addMediaTopic(db)
+        let second = try await addMediaTopic(db)
+        let a = try await db.topicMediaScope(first.id)
+        let b = try await db.topicMediaScope(second.id)
+        let link = try XCTUnwrap(URL(string:"https://fixtures.invalid/artwork/offline.png"))
+        let bytes = pixelPNG(.red)
+        let network = ImageOriginFixture()
+        await network.set(link,bytes,control:"public, max-age=0")
+        let cache = root.appendingPathComponent("evictable", isDirectory:true)
+        let renderer = RemoteImageStore(directory:cache) { try await network.get($0) }
+        let fetched = try await renderer.resource(link,owner:a)
+        XCTAssertEqual(fetched.data,bytes)
+        let shared = try await renderer.resource(link,owner:b)
+        XCTAssertEqual(shared.data,bytes)
+        let unique = try await db.localResourceCount()
+        XCTAssertEqual(unique,1,"Two topic owners of the same URL share a single stored original")
+        try await db.removeTopic(first.id)
+        let afterFirst = try await db.localResourceCount()
+        XCTAssertEqual(afterFirst,1)
+        // A new DB/loader with a different cache directory cannot use the first
+        // loader's in-memory or HTTP cache. The origin below is permanently offline.
+        let reopened = try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
+        let offline = ImageOriginFixture()
+        let reader = RemoteImageStore(directory:root.appendingPathComponent("empty-cache")) { try await offline.get($0) }
+        let remainingOwner = try await reopened.topicMediaScope(second.id)
+        let read = try await reader.resource(link,owner:remainingOwner)
+        XCTAssertEqual(read.data,bytes)
+        let offlineCalls = await offline.count(link)
+        XCTAssertEqual(offlineCalls,0,"Reopening a saved topic must not issue a network request")
+        try await reopened.removeTopic(second.id)
+        let none = try await reopened.localResourceCount()
+        XCTAssertEqual(none,0)
+    }
+
+    @MainActor func testLateDownloadCannotRecreateDeletedTopicOrClaimReusedID() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let topic = try await addMediaTopic(db)
+        let originalScope = try await db.topicMediaScope(topic.id)
+        let link = try XCTUnwrap(URL(string:"https://fixtures.invalid/gallery/delayed.png"))
+        let gate = DelayedMediaOrigin(bytes:pixelPNG(.green))
+        let renderer = RemoteImageStore(directory:root.appendingPathComponent("cache")) { _ in await gate.fetch() }
+        let transfer = Task { try await renderer.resource(link,owner:originalScope) }
+        try await eventually("synthetic transfer entered the origin") { await gate.entered }
+        try await db.removeTopic(topic.id)
+        try await db.put(topic,kind:"topic",id:topic.id)
+        _ = try await db.topicMediaScope(topic.id)
+        await gate.release()
+        do { _ = try await transfer.value; XCTFail("A transfer from the retired topic generation completed") } catch {}
+        let orphanCount = try await db.localResourceCount()
+        XCTAssertEqual(orphanCount,0,"The replacement topic must not inherit a late write")
+    }
+
+    @MainActor func testSyncReplacementRetainsMediaOnlyForSurvivingTopicsAndClearHistoryRemovesIt() async throws {
+        let (root,db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profile = SyncProfile(id:"fixture", endpoint:"https://fixtures.invalid")
+        let agent = VCPAgent(id:profile.localID("agent","A"),name:"fixture")
+        try await db.put(agent,kind:"agent",id:agent.id)
+        let keep = try await addMediaTopic(db,ownerID:agent.id)
+        let remove = try await addMediaTopic(db,ownerID:agent.id)
+        let keepScope = try await db.topicMediaScope(keep.id), removeScope = try await db.topicMediaScope(remove.id)
+        let link = try XCTUnwrap(URL(string:"https://fixtures.invalid/a.png"))
+        let second = try XCTUnwrap(URL(string:"https://fixtures.invalid/b.png"))
+        let origin = ImageOriginFixture(), a = pixelPNG(.red), b = pixelPNG(.blue)
+        await origin.set(link,a); await origin.set(second,b)
+        let renderer = RemoteImageStore(directory:root.appendingPathComponent("cache")) { try await origin.get($0) }
+        _ = try await renderer.resource(link,owner:keepScope)
+        _ = try await renderer.resource(second,owner:removeScope)
+        let before = try await db.syncSnapshot().managed(by:profile)
+        var after=before
+        after.topics.removeAll { $0.id==remove.id }
+        try await db.commitSync(profile:profile,previous:profile,before:before,after:after)
+        let remaining=try await db.localResourceCount()
+        XCTAssertEqual(remaining,1,"A temporary topic-row replacement during sync must preserve the retained owner's asset")
+        let offline = ImageOriginFixture()
+        let fresh = RemoteImageStore(directory:root.appendingPathComponent("different-cache")) { try await offline.get($0) }
+        let kept = try await fresh.resource(link,owner:keepScope)
+        XCTAssertEqual(kept.data,a)
+        let calls = await offline.count(link); XCTAssertEqual(calls,0)
+        _ = try await db.clearHistory(replacement:ChatTopic(ownerId:agent.id))
+        let afterClear=try await db.localResourceCount()
+        XCTAssertEqual(afterClear,0,"A text history archive does not retain the deleted live topics' resource files")
+    }
+
+    func testReadingDoesNotResumeWhenReflowPutsTheBottomNearTheViewport() {
+        var follow=TranscriptFollowing()
+        XCTAssertTrue(follow.canScrollToLatest)
+        follow.beginInteraction()
+        follow.markReading()
+        XCTAssertFalse(follow.canScrollToLatest)
+        follow.endInteraction(atLatest:true)
+        XCTAssertFalse(follow.canScrollToLatest, "A shrinking placeholder cannot opt the reader back into following")
+        follow.beginInteraction()
+        follow.endInteraction(atLatest:false)
+        XCTAssertFalse(follow.canScrollToLatest)
+        follow.resume()
+        XCTAssertTrue(follow.canScrollToLatest)
+    }
+
+    @MainActor func testOffscreenIslandRestoresItsMeasuredHeightAfterCellIdentityChanges() async throws {
+        let state = OffscreenIslandFixtureState()
+        let window = try host(OffscreenIslandFixture(state:state))
+        defer { window.isHidden = true }
+        // Wait for actual WebKit layout; a cold simulator may take longer than the
+        // general UI helper's 12-second budget. The card is taller than any placeholder.
+        let clock = ContinuousClock()
+        let deadline = clock.now + .seconds(65)
+        while (state.heights[0] ?? 0) < 400 {
+            guard clock.now < deadline else { return XCTFail("The online island never measured its 414pt card: \(state.heights)") }
+            try await Task.sleep(for:.milliseconds(150))
+        }
+        let measured = try XCTUnwrap(state.heights[0])
+        state.offscreen = true
+        state.incarnation += 1
+        // The new view is deliberately outside the viewport: it cannot obtain its
+        // old height by loading WebKit again. It must reserve the previous layout.
+        try await eventually("offscreen replacement reserves the measured card height") {
+            guard let height=state.heights[1] else { return false }
+            return abs(height-measured)<2
+        }
+    }
+
+    @MainActor func testOwnedWebKitImageIsAvailableToNativeReaderAfterProcessRestart() async throws {
+        let (root,db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let topic=try await addMediaTopic(db), url=try XCTUnwrap(URL(string:"https://fixtures.invalid/card/photo.png"))
+        let owner=try await db.topicMediaScope(topic.id)
+        let origin=ImageOriginFixture(), bytes=pixelPNG(.cyan)
+        await origin.set(url,bytes,control:"public, max-age=0")
+        let store=RemoteImageStore(directory:root.appendingPathComponent("cache-a")) { try await origin.get($0) }
+        try await renderFixtureImage(url,using:store,owner:owner)
+        let first=await origin.count(url)
+        XCTAssertEqual(first,1)
+        let reopened=try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
+        let coldOwner=try await reopened.topicMediaScope(topic.id)
+        XCTAssertFalse(coldOwner.imageSizes.isEmpty,"Reserve the decoded dimensions on a cold launch")
+        let offline=ImageOriginFixture()
+        let reader=RemoteImageStore(directory:root.appendingPathComponent("cache-b")) { try await offline.get($0) }
+        let saved=try await reader.resource(url,owner:coldOwner)
+        XCTAssertEqual(saved.data,bytes)
+        let replay=await offline.count(url)
+        XCTAssertEqual(replay,0)
+    }
+
+    @MainActor func testTopicArchiveDoesNotPersistNoStoreResponsesOrReuseOtherCredentials() async throws {
+        let (root,db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let topic=try await addMediaTopic(db), scope=try await db.topicMediaScope(topic.id)
+        let origin=ImageOriginFixture(), pixels=pixelPNG(.orange)
+        let store=RemoteImageStore(directory:root.appendingPathComponent("http-cache")) { try await origin.get($0) }
+        let forbidden=try XCTUnwrap(URL(string:"https://fixtures.invalid/do-not-store.png"))
+        await origin.set(forbidden,pixels,control:"private, no-store")
+        let permittedForDisplay=try await store.resource(forbidden,owner:scope)
+        XCTAssertEqual(permittedForDisplay.data,pixels)
+        let before=try await db.localResourceCount()
+        XCTAssertEqual(before,0)
+        let good=try XCTUnwrap(URL(string:"https://fixtures.invalid/pw=synthetic-a/images/pic.png?v=1"))
+        await origin.set(good,pixels)
+        _ = try await store.resource(good,owner:scope)
+        let offline=ImageOriginFixture()
+        let reopened=RemoteImageStore(directory:root.appendingPathComponent("empty")) { try await offline.get($0) }
+        for raw in [forbidden.absoluteString,"https://fixtures.invalid/pw=synthetic-b/images/pic.png?v=1","https://fixtures.invalid/pw=synthetic-a/images/pic.png?v=2"] {
+            let u=try XCTUnwrap(URL(string:raw))
+            do { _ = try await reopened.resource(u,owner:scope);XCTFail("A different access path or no-store response was persisted") } catch {}
+            let attempts=await offline.count(u)
+            XCTAssertEqual(attempts,1)
+        }
+    }
+
+    @MainActor func testTopicVideoReopensAsALocalFileAndReleasesPlaybackFile() async throws {
+        let (root,db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let topic=try await addMediaTopic(db), scope=try await db.topicMediaScope(topic.id)
+        // Synthetic ISO BMFF file-type box. This verifies storage and materialization;
+        // codec support remains the responsibility of AVPlayer.
+        let bytes=Data([0,0,0,20, 0x66,0x74,0x79,0x70, 0x69,0x73,0x6f,0x6d,
+                        0,0,2,0, 0x69,0x73,0x6f,0x6d])
+        let url=try XCTUnwrap(URL(string:"https://fixtures.invalid/media/movie.mp4"))
+        let seed=TopicVideoStore { _ in (bytes,200,"video/mp4","public, max-age=0") }
+        let copy=try await seed.resource(url,owner:scope)
+        XCTAssertEqual(copy.data,bytes)
+        XCTAssertEqual(copy.mime,"video/mp4")
+        let offline=TopicVideoStore { _ in throw URLError(.notConnectedToInternet) }
+        let reopened=try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
+        let fresh=try await reopened.topicMediaScope(topic.id)
+        let replay=try await offline.resource(url,owner:fresh)
+        XCTAssertEqual(replay.data,bytes)
+        let player=NativeMediaLoader(videoCacheDirectory:root.appendingPathComponent("playback"))
+        let file=try await player.video(url.absoluteString,owner:fresh)
+        XCTAssertTrue(file.url.isFileURL,"Playback of an owned MP4 should come from disk")
+        XCTAssertEqual(try Data(contentsOf:file.url),bytes)
+        await player.release(file)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:file.url.path))
+        for (path, type) in [("fake.mp4","text/html"),("not-video.mp4","video/mp4")] {
+            let bad=TopicVideoStore { _ in (type=="text/html" ? bytes : Data("login required".utf8),200,type,"") }
+            do {
+                _ = try await bad.resource(url.deletingLastPathComponent().appendingPathComponent(path),owner:fresh)
+                XCTFail("An invalid movie should not become a permanent attachment")
+            } catch {}
+        }
+        let objects=try await reopened.localResourceCount()
+        XCTAssertEqual(objects,1)
+        try await reopened.removeTopic(topic.id)
+        let cleared=try await reopened.localResourceCount()
+        XCTAssertEqual(cleared,0)
+    }
+
+    @MainActor func testOfflineHTMLClaimsResponsiveBackgroundAndScriptInsertedImages() async throws {
+        let (root,db)=try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let library=try await addMediaTopic(db), destination=try await addMediaTopic(db)
+        let seedScope=try await db.topicMediaScope(library.id), shownScope=try await db.topicMediaScope(destination.id)
+        // Disabled local port: any route that bypasses the app's resource handler fails.
+        // There is no externally reachable URL and no production chat credential.
+        let urls=try ["responsive","background","script"].map { try XCTUnwrap(URL(string:"https://127.0.0.1:1/fixture-\($0).png")) }
+        let bytes=pixelPNG(.purple)
+        let synthetic=RemoteImageStore(directory:root.appendingPathComponent("seed")) { _ in RemoteImageReply(data:bytes,status:200,cacheControl:"public, max-age=0") }
+        for url in urls { _ = try await synthetic.resource(url,owner:seedScope) }
+        let page="""
+        <div id="vcp-root">
+        <img id="responsive" srcset="\(urls[0].absoluteString) 1x" alt="responsive">
+        <div id="backdrop" style="width:48px;height:48px;background-image:url('\(urls[1].absoluteString)')"></div>
+        <script>
+        const photo=document.createElement('img');
+        photo.id='inserted';
+        photo.src='\(urls[2].absoluteString)';
+        document.getElementById('vcp-root').append(photo);
+        </script>
+        </div>
+        """
+        let window=try host(HTMLIsland(source:page,options:.init())
+            .environment(\.scenePhase,.active).environment(\.topicMediaOwner,shownScope))
+        defer { window.isHidden=true }
+        try await eventually("fixture web view mounts") { self.find(WKWebView.self,in:window) != nil }
+        let web=try XCTUnwrap(find(WKWebView.self,in:window))
+        let clock=ContinuousClock(), deadline=clock.now + .seconds(60)
+        while web.isLoading || web.url == nil {
+            guard clock.now < deadline else { return XCTFail("Offline card did not finish navigation") }
+            try await Task.sleep(for:.milliseconds(200))
+        }
+        guard try await observeIsland(web,"offline responsive and script-inserted image bytes are decoded",condition:"""
+        const a=document.getElementById('responsive'), b=document.getElementById('inserted');
+        return a && b && a.complete && b.complete && a.naturalWidth > 0 && b.naturalWidth > 0;
+        """) else { return }
+        let keys=Set(urls.map(RemoteImageStore.key))
+        // Checking recorded ownership proves the CSS background request took the native path as well.
+        try await eventually("all three resources were supplied and linked to this card's topic") {
+            guard let refreshed=try? await db.topicMediaScope(destination.id) else { return false }
+            return keys.isSubset(of:Set(refreshed.imageSizes.keys))
+        }
+        try await db.removeTopic(library.id)
+        let linked=try await db.localResourceCount()
+        XCTAssertEqual(linked,3,"Deleting the seed topic must not remove resources displayed by the other card")
+    }
+
+    private var fixtureSVG: String {
+        """
+        <svg id="fixture-root-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 56" width="100%" role="img">
+          <defs><linearGradient id="fixture-gradient"><stop offset="0%" stop-color="#1687a7"/><stop offset="100%" stop-color="#58b490"/></linearGradient></defs>
+          <rect x="0" y="0" width="120" height="56" rx="8" fill="url(#fixture-gradient)"/>
+          <circle cx="18" cy="27" r="4"><animate attributeName="cx" from="18" to="96" dur="2s" repeatCount="indefinite"/></circle>
+        </svg>
+        """
+    }
+
+    @MainActor private func readyFixtureWeb(_ window:UIWindow, scenario:String) async throws -> WKWebView {
+        try await eventually("WebKit mounts for " + scenario) { self.find(WKWebView.self,in:window) != nil }
+        let web=try XCTUnwrap(find(WKWebView.self,in:window))
+        let clock=ContinuousClock(), deadline=clock.now + .seconds(60)
+        while web.isLoading || web.url == nil {
+            guard clock.now < deadline else { XCTFail("WebKit did not navigate for " + scenario); return web }
+            try await Task.sleep(for:.milliseconds(200))
+        }
+        return web
+    }
+
+    @MainActor func testLeadingStylesAndKeyframesSurviveBesideAnimationAndProse() async throws {
+        let css="""
+        <style>
+        @keyframes fixturePulse { from { opacity:.45 } to { opacity:.95 } }
+        .regression-fixture-card { padding:13px; border-radius:17px; background:linear-gradient(90deg,#1687a7,#58b490); }
+        .regression-fixture-card strong { animation: fixturePulse 2s ease-in-out infinite alternate; }
+        </style>
+        """
+        let card = #"<div class="regression-fixture-card"><strong>内容卡</strong></div>"#
+        let ticks = String(repeating:"`", count:3)
+        let guide = ticks+"html\n<style>.regression-fixture-card { --fenced: existing-example; }</style>\n"+ticks
+        let unrelated = "<style>.totally-unrelated-fixture { --not-for-card: 1; }</style>"
+        let rich = ["前段正文",guide,unrelated,css,"中间的 **独立说明** 不能被卷入卡片。",card,fixtureSVG,"后段正文"].joined(separator:"\n\n")
+        let blocks = try await MessageRenderer().render(rich,options:.init(),dark:false)
+        let islands=blocks.compactMap { block -> String? in if case .html(let src)=block { return src }; return nil }
+        let styled=try XCTUnwrap(islands.first { $0.contains("regression-fixture-card") && $0.contains("<strong>") })
+        XCTAssertTrue(styled.contains("@keyframes fixturePulse"),"An isolated stylesheet cannot style the following WebView")
+        XCTAssertFalse(styled.contains("--fenced") || styled.contains("--not-for-card"),"Code examples and unrelated rules are not inherited")
+        XCTAssertFalse(styled.contains("独立说明"),"The intervening paragraph remains native Markdown")
+        let svg=try XCTUnwrap(islands.first { $0.contains("<svg") && $0.contains("fixture-root-svg") })
+        XCTAssertFalse(svg.contains("fixturePulse"),"A detached style must not leak to the next SVG document")
+        XCTAssertTrue(blocks.contains { if case .code(_,let value,_)=$0 {return value.contains("--fenced")};return false })
+        let prose=blocks.compactMap { block -> String? in
+            guard case .paragraph(let runs)=block else { return nil }
+            return runs.compactMap { if case .text(let t)=$0 { return String(t.characters) };return nil }.joined()
+        }.joined()
+        XCTAssertTrue(["前段正文","独立说明","后段正文"].allSatisfy { prose.contains($0) })
+        XCTAssertFalse(prose.contains("fixturePulse"))
+        XCTAssertFalse(blocks.contains { if case .literal(let value)=$0 {return value.contains("fixturePulse")};return false },
+                       "Applied stylesheet must never also appear as literal source")
+        let window=try host(HTMLIsland(source:styled,options:.init()).environment(\.scenePhase,.active))
+        defer { window.isHidden=true }
+        let web=try await readyFixtureWeb(window,scenario:"styled card")
+        _ = try await observeIsland(web,"gradient, DOM and keyframes actually apply to the card",condition:"""
+        const card=document.querySelector('.regression-fixture-card');
+        if(!card || card.querySelector('strong')?.textContent !== '内容卡') return false;
+        const rendered=getComputedStyle(card);
+        const keyframes=[...document.styleSheets].some(s=>[...s.cssRules].some(rule=>rule.name==='fixturePulse'));
+        return rendered.paddingTop==='13px' && rendered.borderTopLeftRadius==='17px' &&
+            rendered.backgroundImage.includes('linear-gradient') && keyframes && card.getBoundingClientRect().width>0;
+        """)
+    }
+
+    @MainActor func testStandaloneSVGUsesSVGNamespaceAndFenceRemainsSource() async throws {
+        let engine=MessageRenderer()
+        let open=try await engine.render("图示：\n\n"+fixtureSVG+"\n\n完。",options:.init(),dark:false)
+        let raw=try XCTUnwrap(open.compactMap { block -> String? in if case .html(let value)=block {return value}; return nil }.first)
+        let ticks=String(repeating:"`", count:3)
+        let code=try await engine.render(ticks+"svg\n"+fixtureSVG+"\n"+ticks,options:.init(),dark:false)
+        XCTAssertTrue(code.contains { if case .code("svg",let text,_)=$0 { return text.contains("<animate") && text.contains("<svg") }; return false })
+        XCTAssertFalse(code.contains { if case .html=$0 {return true};return false })
+        let window=try host(HTMLIsland(source:raw,options:.init()).environment(\.scenePhase,.active))
+        defer { window.isHidden=true }
+        let web=try await readyFixtureWeb(window,scenario:"standalone SVG")
+        _ = try await observeIsland(web,"standalone SVG is drawn with native geometry and its gradient and SMIL children",condition:"""
+        const svg=document.querySelector('#fixture-root-svg'), ns='http://www.w3.org/2000/svg';
+        if(!svg) return false;
+        const rect=svg.querySelector('rect'), circle=svg.querySelector('circle'), defs=svg.querySelector('defs');
+        const gradient=defs?.querySelector('linearGradient'), animation=circle?.querySelector('animate');
+        if(![svg,rect,circle,defs,gradient,animation].every(x=>x?.namespaceURI===ns)) return false;
+        return svg.viewBox.baseVal.width===120 && svg.getBoundingClientRect().width>0 &&
+            rect.getBBox().width===120 && rect.getAttribute('fill')==='url(#fixture-gradient)' &&
+            gradient.querySelectorAll('stop').length===2 && animation.getAttribute('attributeName')==='cx';
+        """)
+    }
+
     private let receiptID = "2026-11-19T22:50:25.956+08:00"
     private func batch(_ body: String, id: String, shell: Bool = true) -> String {
         let source = "<<<[VCP_TOOL_BATCH_START:\(id)]>>>\n" + body + "\n<<<[VCP_TOOL_BATCH_END:\(id)]>>>"
@@ -660,14 +1018,17 @@ final class PhoneInteractionTests: XCTestCase {
         return await new Promise((resolve, reject) => {
             const matches = () => { \(condition) };
             const observer = new MutationObserver(check);
-            const timer = setTimeout(() => { observer.disconnect(); reject(new Error('island condition not reached')); }, 30000);
+            const cleanup = () => { observer.disconnect(); clearTimeout(timer); document.removeEventListener('load', check, true); };
+            const timer = setTimeout(() => { cleanup(); reject(new Error('island condition not reached')); }, 30000);
             function check() {
                 try {
                     if (!matches()) return;
-                    observer.disconnect(); clearTimeout(timer); resolve(true);
-                } catch (error) { observer.disconnect(); clearTimeout(timer); reject(error); }
+                    cleanup(); resolve(true);
+                } catch (error) { cleanup(); reject(error); }
             }
             observer.observe(document, { attributes: true, childList: true, subtree: true, characterData: true });
+            // A resource load changes naturalWidth without necessarily mutating an attribute.
+            document.addEventListener('load', check, true);
             check();
         });
         """
@@ -777,9 +1138,10 @@ final class PhoneInteractionTests: XCTestCase {
         """)
     }
 
-    @MainActor private func renderFixtureImage(_ url: URL, using store: RemoteImageStore) async throws {
+    @MainActor private func renderFixtureImage(_ url: URL, using store: RemoteImageStore, owner: TopicMediaScope? = nil) async throws {
         let handler = IslandImageScheme(store: store)
         handler.mediaEnabled = true
+        handler.owner = owner
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.userContentController.removeAllUserScripts()
@@ -917,4 +1279,44 @@ private final class AtlasResponseFixture: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+// Deterministic deletion race; the fixture cannot complete until the test releases it.
+private actor DelayedMediaOrigin {
+    let bytes: Data
+    private(set) var entered=false
+    private var waiter: CheckedContinuation<Void,Never>?
+    private var released = false
+    init(bytes:Data) { self.bytes=bytes }
+    func fetch() async -> RemoteImageReply {
+        entered=true
+        if !released { await withCheckedContinuation { waiter=$0 } }
+        return RemoteImageReply(data:bytes,status:200,cacheControl:"public, max-age=0")
+    }
+    func release() { released=true; waiter?.resume();waiter=nil }
+}
+
+@MainActor private final class OffscreenIslandFixtureState: ObservableObject {
+    @Published var offscreen=false
+    @Published var incarnation=0
+    let memory=TranscriptLayoutMemory()
+    var heights: [Int:CGFloat]=[:]
+}
+private struct OffscreenIslandFixture: View {
+    @ObservedObject var state: OffscreenIslandFixtureState
+    private let source = #"<div id="vcp-root" style="height:414px">A large, stable offline card</div>"#
+    var body: some View {
+        let version=state.incarnation
+        let viewport = state.offscreen ? CGRect(x:-10000,y:-10000,width:1,height:1) : CGRect(x:-1000,y:-1000,width:3000,height:3000)
+        return ScrollView {
+            HTMLIsland(source:source,options:.init())
+                .environment(\.scenePhase,.active)
+                .environment(\.messageViewport,viewport)
+                .environment(\.messageLayoutMemory,state.memory)
+                .environment(\.renderedMessageID,"fixture-message")
+                .frame(width:248)
+                .onGeometryChange(for:CGFloat.self,of:{ $0.size.height }) { height in state.heights[version]=height }
+                .id(version)
+        }.coordinateSpace(name:"vcp-message-viewport")
+    }
 }
