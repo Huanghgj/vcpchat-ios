@@ -83,7 +83,7 @@ struct NativeMessageMedia: View {
                 }
             } else if let issue { Label(issue,systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
             else { Label(visible ? "正在读取图片…" : "图片已暂停",systemImage: "photo").font(.caption).foregroundStyle(.secondary).frame(height: imageWidth.map { min($0, 180) } ?? 100) }
-            if !item.caption.isEmpty && item.preferredWidth == nil { Text(item.caption).font(.caption).foregroundStyle(.secondary) }
+            if !item.caption.isEmpty && item.preferredWidth == nil { Text(verbatim:item.caption).font(.caption).foregroundStyle(.secondary).lineLimit(nil).fixedSize(horizontal:false,vertical:true) }
             if issue != nil || video.error != nil,let url = URL(string: item.source),["https","http"].contains(url.scheme) { Link("打开原链接",destination: url).font(.caption) }
         }.frame(maxWidth: .infinity,alignment: .leading)
             .background(GeometryReader { g in Color.clear.preference(key: MediaBounds.self,value: g.frame(in: .global)) })

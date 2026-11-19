@@ -83,6 +83,11 @@ public struct RichMessageBody: View {
             else if !rendering.hasRendered && rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
             else { NativeBlocks(blocks: rendering.blocks, options: options,streaming: rendering.streaming).equatable() }
         }
+        // A self-sizing chat row may initially propose just one line while a sticker
+        // loads or the reasoning disclosure is toggled. Keep the proposed width and
+        // measure the complete body at that width instead of truncating to fit.
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)
         .onChange(of: RenderState.Input(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth), initial: true) { _, input in
             if visible && phase != .background && !plain { rendering.update(input) } else { rendering.cancel() }
@@ -172,10 +177,28 @@ private struct InlineBody: View {
     private func emphasized(_ value: AttributedString) -> AttributedString { MarkdownTextStyle.emphasized(value,color: emphasisColor) }
     var runs: [InlineRun]
     var animations = true
+    private func prose(_ value: AttributedString) -> some View {
+        Text(value).modifier(MessageTextSelection())
+            .lineSpacing(4).lineLimit(nil).fixedSize(horizontal:false,vertical:true)
+    }
     var text: AttributedString {
         runs.reduce(into: AttributedString()) { result, run in if case .text(let text) = run { result.append(emphasized(text)) } }
     }
     var hasMath: Bool { runs.contains { if case .math = $0 { return true }; return false } }
+    /// A text run ends on links, emphasis and explicit line breaks as well as on
+    /// images. Adjacent attributed runs still belong to the same wrapping paragraph.
+    private var mixedRuns: [InlineRun] {
+        var groups:[InlineRun]=[], text=AttributedString()
+        func flush() {
+            if !text.characters.isEmpty { groups.append(.text(text)); text=AttributedString() }
+        }
+        for run in runs {
+            if case .text(let value)=run { text.append(value) }
+            else { flush(); groups.append(run) }
+        }
+        flush()
+        return groups
+    }
     var pieces: [InlineRun] {
         var pieces: [InlineRun] = []
         for run in runs {
@@ -191,14 +214,14 @@ private struct InlineBody: View {
     }
     var body: some View {
         if runs.contains(where: { if case .media = $0 { true } else { false } }) {
-            VStack(alignment: .leading,spacing: 10) { ForEach(Array(runs.enumerated()),id: \.offset) { _,run in
-                switch run { case .text(let value): Text(emphasized(value)).modifier(MessageTextSelection()).lineSpacing(4); case .math(let value): NativeMath(value); case .media(let item): NativeMessageMedia(item: item,animations: animations) }
+            VStack(alignment: .leading,spacing: 10) { ForEach(Array(mixedRuns.enumerated()),id: \.offset) { _,run in
+                switch run { case .text(let value): prose(emphasized(value)); case .math(let value): NativeMath(value); case .media(let item): NativeMessageMedia(item: item,animations: animations) }
             } }
-        } else if !hasMath { Text(text).modifier(MessageTextSelection()).lineSpacing(4) }
+        } else if !hasMath { prose(text) }
         else {
             InlineFlow {
                 ForEach(Array(pieces.enumerated()), id: \.offset) { _, part in
-                    switch part { case .text(let value): Text(emphasized(value)).modifier(MessageTextSelection()); case .math(let value): NativeMath(value, size: 17).fixedSize(); case .media(let item): NativeMessageMedia(item: item,animations: animations) }
+                    switch part { case .text(let value): prose(emphasized(value)); case .math(let value): NativeMath(value, size: 17).fixedSize(); case .media(let item): NativeMessageMedia(item: item,animations: animations) }
                 }
             }
         }
