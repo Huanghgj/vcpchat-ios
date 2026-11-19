@@ -150,6 +150,76 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertTrue(follow.canScrollToLatest)
     }
 
+    func testPreloadWindowFollowsVisibleMessagesInBothDirections() {
+        func rows(_ count: Int, _ visible: [Int], _ depth: Int) -> Set<Int> {
+            Set(TranscriptPreloadDepth.indices(count: count, visible: visible, depth: depth))
+        }
+        XCTAssertEqual(TranscriptPreloadDepth.standard, 10)
+        XCTAssertEqual(rows(100,[42,43],10), Set(32...53))
+        XCTAssertEqual(rows(100,[],10), Set(89...99))
+        XCTAssertEqual(rows(100,[0],99), Set(0...20))
+        XCTAssertEqual(rows(100,[10,90],1), [9,10,11,89,90,91])
+        XCTAssertTrue(rows(100,[20],0).isEmpty)
+        XCTAssertTrue(rows(0,[],10).isEmpty)
+    }
+
+    @MainActor func testUnseenCardIsPreparedAndRecycledRowKeepsItsLiveDocument() async throws {
+        let state = NearbyCardFixture()
+        let window = try host(NearbyCardViews(state:state))
+        defer { window.isHidden = true; state.buffer.clear() }
+        let slot = IslandSlot(message:"nearby",index:0)
+        try await eventually("WKWebView prepared while its transcript row does not exist") {
+            state.buffer.parkedController(at:slot)?.view != nil
+        }
+        let web = try XCTUnwrap(state.buffer.parkedController(at:slot)?.view)
+        XCTAssertNil(find(WKWebView.self, in:window))
+        let clock = ContinuousClock(), deadline = clock.now + .seconds(60)
+        while web.isLoading || web.url == nil {
+            guard clock.now < deadline else { return XCTFail("Preloaded card did not finish its initial navigation") }
+            try await Task.sleep(for:.milliseconds(150))
+        }
+        guard try await observeIsland(web, "card DOM exists before creating its row", condition:
+            "return !!document.querySelector('#nearby-details');") else { return }
+        state.showRow = true
+        try await eventually("row adopts preloaded web view") { self.find(WKWebView.self,in:window) === web }
+        _ = try await web.evaluateJavaScript("document.querySelector('details').open = true")
+        state.showRow = false
+        try await eventually("recycled row handed the live document back") {
+            state.buffer.parkedController(at:slot)?.view === web && self.find(WKWebView.self,in:window) == nil
+        }
+        state.showRow = true
+        try await eventually("row reattaches the same document") { self.find(WKWebView.self,in:window) === web }
+        let open = try await web.evaluateJavaScript("document.querySelector('details')?.open === true")
+        XCTAssertEqual(open as? Bool, true)
+        state.showRow = false
+        state.enabled = false
+        try await eventually("turning off preload releases offscreen WebKit") {
+            state.buffer.parkedController(at:slot) == nil && self.find(WKWebView.self,in:window) == nil
+        }
+    }
+
+    @MainActor func testPreloaderDecodesNearbyTopicImageBeforeRowAppears() async throws {
+        let (root, store) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let topic = try await addMediaTopic(store)
+        let owner = try await store.topicMediaScope(topic.id)
+        let url = try XCTUnwrap(URL(string:"https://fixtures.invalid/preload/photo.png"))
+        let bytes = pixelPNG(.orange)
+        let seed = RemoteImageStore(directory:root.appendingPathComponent("seed")) { _ in
+            RemoteImageReply(data:bytes,status:200,cacheControl:"public, max-age=86400")
+        }
+        _ = try await seed.resource(url,owner:owner)
+        let buffer = TranscriptRenderBuffer()
+        let item = TranscriptRenderItem(id:"photo",source:"![预览](\(url.absoluteString))",role:"assistant",depth:0,rules:[],streaming:false)
+        let window = try host(TranscriptPreloader(items:[item],options:.init(),buffer:buffer,width:280,memory:TranscriptLayoutMemory())
+            .environment(\.topicMediaOwner,owner).environment(\.scenePhase,.active))
+        defer { window.isHidden = true; buffer.clear() }
+        try await eventually("photo decoded without displaying a message") {
+            buffer.image(message:"photo",source:url.absoluteString,owner:owner,stickers:.init()) != nil
+        }
+        XCTAssertNil(buffer.image(message:"photo",source:url.absoluteString,owner:nil,stickers:.init()))
+    }
+
     @MainActor func testOffscreenIslandRestoresItsMeasuredHeightAfterCellIdentityChanges() async throws {
         let state = OffscreenIslandFixtureState()
         let window = try host(OffscreenIslandFixture(state:state))
@@ -1330,5 +1400,30 @@ private struct OffscreenIslandFixture: View {
                 .onGeometryChange(for:CGFloat.self,of:{ $0.size.height }) { height in state.heights[version]=height }
                 .id(version)
         }.coordinateSpace(name:"vcp-message-viewport")
+    }
+}
+
+@MainActor private final class NearbyCardFixture: ObservableObject {
+    let buffer = TranscriptRenderBuffer()
+    let memory = TranscriptLayoutMemory()
+    let source = #"<div id="vcp-root"><details id="nearby-details"><summary>详情</summary>已展开</details></div>"#
+    @Published var showRow = false
+    @Published var enabled = true
+}
+private struct NearbyCardViews: View {
+    @ObservedObject var state: NearbyCardFixture
+    var body: some View {
+        ZStack {
+            TranscriptPreloader(items:state.enabled ? [.init(id:"nearby",source:state.source,role:"assistant",depth:0,rules:[],streaming:false)] : [],
+                                options:.init(),buffer:state.buffer,width:280,memory:state.memory)
+            if state.showRow {
+                RichMessageBody(state.source,transcriptRow:true)
+                    .environment(\.renderedMessageID,"nearby")
+                    .environment(\.messageLayoutMemory,state.memory)
+                    .frame(width:280)
+            }
+        }
+        .environment(\.transcriptRenderBuffer,state.buffer)
+        .environment(\.scenePhase,.active)
     }
 }

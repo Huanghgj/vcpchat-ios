@@ -86,6 +86,7 @@ private struct AboutVChat: View {
     }
 }
 private struct RenderingSettings: View {
+    @AppStorage(TranscriptPreloadDepth.key) private var preloadDepth = TranscriptPreloadDepth.standard
     @Bindable var model: ChatViewModel
     @State private var savingBubbleRule = false
     @State private var importingStickers = false
@@ -152,6 +153,14 @@ private struct RenderingSettings: View {
                 }
                 Toggle("高级渲染",isOn: $model.renderOptions.enabled).font(.headline).padding(18).workspaceGlass(palette)
                 VStack(spacing: 0) {
+                    Stepper(value: $preloadDepth, in: TranscriptPreloadDepth.range) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("前后预加载：各 \(preloadDepth) 条")
+                            Text("提前准备屏幕上下的消息。设为 0 可关闭；条数越多，占用内存越多。")
+                                .font(.caption).foregroundStyle(palette.muted)
+                        }
+                    }.padding(17)
+                    WorkspaceSeparator(palette: palette)
                     toggle("代码高亮","代码块的语法着色",$model.renderOptions.code)
                     toggle("数学公式","原生数学排版与符号",$model.renderOptions.math)
                     toggle("Mermaid 图表","流程图、时序图等",$model.renderOptions.mermaid)

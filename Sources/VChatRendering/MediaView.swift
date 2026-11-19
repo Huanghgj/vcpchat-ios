@@ -65,6 +65,7 @@ struct NativeMessageMedia: View {
     @Environment(\.messageLayoutMemory) private var layoutMemory
     @State private var localSize:CGSize?
     @Environment(\.stickerContext) private var stickers
+    @Environment(\.transcriptRenderBuffer) private var buffer
     @Environment(\.messageViewport) private var viewport
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -108,6 +109,9 @@ struct NativeMessageMedia: View {
             .onChange(of: visible) { _,v in if !v { video.close() } }
             .task(id: Load(source:item.id,stickers:stickers,visible:visible,owner:owner)) {
                 guard visible,item.kind == "image", image == nil else { return }
+                if let ready = buffer?.image(message: messageID,source: item.source,owner: owner,stickers: stickers) {
+                    image = ready; issue = nil; return
+                }
                 let source: String
                 if item.source.lowercased().hasPrefix("data:") { source=item.source }
                 else if let url=await StickerResolver.shared.url(item.source,in:stickers) { source=url.absoluteString }

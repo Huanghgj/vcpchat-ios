@@ -28,7 +28,13 @@ import VChatRendering
     let id: String
     var mediaScope: TopicMediaScope?
     @ObservationIgnored let layoutMemory = TranscriptLayoutMemory()
-    var messages: [MessageViewModel] { didSet { depths = TurnDepths.calculate(messages.map(\.record)) } }
+    var messages: [MessageViewModel] { didSet { indexMessages() } }
+    private(set) var positions: [String:Int] = [:]
+    private func indexMessages() {
+        depths = TurnDepths.calculate(messages.map(\.record))
+        positions.removeAll(keepingCapacity: true)
+        for (index, message) in messages.enumerated() { positions[message.id] = index }
+    }
     var depths: [String: Int] = [:]
     var draft = ""
     var attachments: [ChatAttachment] = []
@@ -45,7 +51,7 @@ import VChatRendering
     @ObservationIgnored var generation: Task<Void, Never>?
     @ObservationIgnored var draftSave: Task<Void, Never>?
     init(id: String, messages: [StoredMessage]) {
-        self.id = id; self.messages = messages.map(MessageViewModel.init); depths = TurnDepths.calculate(messages)
+        self.id = id; self.messages = messages.map(MessageViewModel.init); indexMessages()
         pendingCount = messages.filter { $0.status == "pending" }.count
     }
 }

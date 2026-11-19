@@ -257,16 +257,25 @@ private enum IslandScripts {
     }
 }
 
+extension HTMLIslandPolicy {
+    @MainActor static func shell(options: RenderOptions, environment: EnvironmentValues) -> String {
+        let color = environment.messageEmphasisColor.resolve(in: environment)
+        let hex = String(format: "#%02x%02x%02x",Int(min(1,max(0,color.red)) * 255),Int(min(1,max(0,color.green)) * 255),Int(min(1,max(0,color.blue)) * 255))
+        return document("",motion: options.motion && !environment.accessibilityReduceMotion,media: options.media,
+                        dark: environment.colorScheme == .dark,emphasisColor: hex,topicMedia: environment.topicMediaOwner != nil)
+    }
+}
+
 private struct ViewportKey: EnvironmentKey { static let defaultValue: CGRect? = nil }
 extension EnvironmentValues { public var messageViewport: CGRect? { get { self[ViewportKey.self] } set { self[ViewportKey.self] = newValue } } }
-@MainActor @Observable private final class IslandPool {
+@MainActor @Observable final class IslandPool {
     static let shared = IslandPool()
     private var idle: [WKWebView] = []
     private var active: [UUID: WKWebView] = [:]
     var revision = 0
-    func take(_ id: UUID) -> WKWebView? {
+    func take(_ id: UUID, limit: Int) -> WKWebView? {
         if let view = active[id] { return view }
-        guard active.count < 3 else { return nil }
+        guard active.count < limit else { return nil }
         let view: WKWebView
         if let reusable = idle.popLast() { view = reusable }
         else {
@@ -299,7 +308,7 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
         revision += 1
     }
 }
-@MainActor @Observable private final class IslandController: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+@MainActor @Observable final class IslandController: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     private struct Input: Equatable { var source: String; var streaming: Bool }
     let id = UUID()
     var view: WKWebView?
@@ -314,9 +323,10 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     @ObservationIgnored private var latest: Input?
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var updateTask: Task<Void,Never>?
-    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?) {
+    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?, limit: Int = 3, initialWidth: CGFloat? = nil) {
         guard let runtime = IslandScripts.runtime else { failed = true; failureMessage = "气泡渲染组件缺失，请更新 App"; return }
-        guard let web = view ?? IslandPool.shared.take(id) else { return }
+        guard let web = view ?? IslandPool.shared.take(id, limit: limit) else { return }
+        if view == nil, let initialWidth { web.frame = CGRect(x: 0,y: 0,width: initialWidth,height: height) }
         let imageScheme=web.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme
         let contextChanged=imageScheme?.stickers != stickers || imageScheme?.owner != owner
         imageScheme?.stickers=stickers;imageScheme?.owner=owner;imageScheme?.mediaEnabled=media
@@ -399,11 +409,13 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
 
 struct HTMLIsland: View {
     @Environment(\.self) private var environment
-    @Environment(\.messageEmphasisColor) private var emphasisColor
     var source: String
     var options: RenderOptions
     var streaming = false
-    @State private var controller = IslandController()
+    var slot: IslandSlot? = nil
+    @Environment(\.transcriptRenderBuffer) private var buffer
+    @State private var controller: IslandController?
+    @State private var reservedHeight: CGFloat = 180
     private struct Visibility: Equatable { var width:CGFloat = 0; var onScreen=false }
     @State private var layout = Visibility()
     @Environment(\.topicMediaOwner) private var owner
@@ -411,26 +423,22 @@ struct HTMLIsland: View {
     @Environment(\.renderedMessageID) private var messageID
     @State private var appeared = false
     @Environment(\.messageViewport) private var viewport
-    @Environment(\.colorScheme) private var scheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var phase
     @Environment(\.stickerContext) private var stickers
     @Environment(\.messageLongPressAction) private var showMessageActions
     private var visible: Bool { appeared && phase == .active && (viewport == nil || layout.onScreen) }
     private var heightVariant:String { String(document.hashValue) }
     private func restoreSize() {
-        if let h=memory?.islandHeight(messageID:messageID,source:source,width:layout.width,variant:heightVariant) { controller.height=h }
+        if let h=memory?.islandHeight(messageID:messageID,source:source,width:layout.width,variant:heightVariant) { reservedHeight=h; controller?.height=h }
     }
     private var document: String {
-        let color = emphasisColor.resolve(in: environment)
-        let hex = String(format: "#%02x%02x%02x",Int(min(1,max(0,color.red)) * 255),Int(min(1,max(0,color.green)) * 255),Int(min(1,max(0,color.blue)) * 255))
-        return HTMLIslandPolicy.document("",motion: options.motion && !reduceMotion,media: options.media,dark: scheme == .dark,emphasisColor: hex,topicMedia: owner != nil)
+        HTMLIslandPolicy.shell(options: options, environment: environment)
     }
     var body: some View {
         Group {
-            if let view = controller.view { IslandNativeView(view: view,showActions: showMessageActions).frame(height: controller.height) }
-            else if controller.failed { Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height) }
-            else { Label(visible ? "等待加载视觉气泡" : "视觉气泡已暂停", systemImage: "rectangle.inset.filled").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).frame(height: controller.height) }
+            if let controller, let view = controller.view { IslandNativeView(view: view,showActions: showMessageActions).id(ObjectIdentifier(view)).frame(height: controller.height) }
+            else if let controller, controller.failed { Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height) }
+            else { Label(visible ? "等待加载视觉气泡" : "视觉气泡已暂停", systemImage: "rectangle.inset.filled").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight) }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onGeometryChange(for: Visibility.self,of: { [viewport] g in
@@ -440,25 +448,33 @@ struct HTMLIsland: View {
         .onChange(of:layout.width) { _,_ in restoreSize() }
         .task(id:visible) {
             if visible { restoreSize(); refresh() }
-            else {
-                // Avoid throwing away a document when the scrolling viewport just grazes its edge.
-                do { try await Task.sleep(for:.milliseconds(350)) } catch { return }
-                guard !Task.isCancelled else { return }; controller.unmount()
-            }
+            else { release() }
         }
-        .onAppear { appeared = true; refresh() }.onDisappear { appeared = false; controller.unmount() }
+        .onAppear { appeared = true; refresh() }.onDisappear { appeared = false; release() }
         .onChange(of: owner) { _,_ in refresh() }
         .onChange(of: stickers) { _, _ in refresh() }
         .onChange(of: document) { _, _ in refresh() }
         .onChange(of: source) { _, _ in refresh() }
         .onChange(of: streaming) { _, _ in refresh() }
-        .onChange(of: IslandPool.shared.revision) { _, _ in if visible && controller.view == nil && !controller.failed { refresh() } }
+        .onChange(of: IslandPool.shared.revision) { _, _ in if visible && controller?.view == nil && controller?.failed != true { refresh() } }
     }
     private func refresh() {
         guard visible else { return }
+        let needsAttachment = controller?.view == nil
+        let host = controller ?? slot.flatMap { buffer?.checkout($0) } ?? IslandController()
+        if controller == nil { controller = host }
         let id=messageID, value=source, variant=heightVariant
-        controller.remember = { [weak memory] h,w in memory?.rememberIslandHeight(h,messageID:id,source:value,width:w,variant:variant) }
-        controller.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner)
+        host.remember = { [weak memory] h,w in memory?.rememberIslandHeight(h,messageID:id,source:value,width:w,variant:variant) }
+        host.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner,
+                   limit: buffer == nil ? 3 : TranscriptRenderBuffer.visibleLimit)
+        if needsAttachment { host.view?.setAllMediaPlaybackSuspended(!options.media) }
+    }
+    private func release() {
+        guard let host = controller else { return }
+        reservedHeight = host.height
+        controller = nil
+        if let slot, let buffer { buffer.checkin(host, at: slot) }
+        else { host.unmount() }
     }
 }
 // WebKit consumes SwiftUI ancestor gestures. Keep the recognizer native and
