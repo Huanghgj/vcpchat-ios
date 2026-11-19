@@ -74,9 +74,11 @@ extension ChatStore {
         guard Set(ownerIDs).count == ownerIDs.count,Set(topicIDs).count == topicIDs.count,Set(messageIDs).count == messageIDs.count,ownerIDs.allSatisfy({ $0.hasPrefix(prefix) }),after.topics.allSatisfy({ ownerIDs.contains($0.ownerId) }),after.messages.allSatisfy({ topicIDs.contains($0.topicID) }) else { throw SyncWire.fail("同步记录超出来源范围或有重复身份") }
         let foreign = all.managedExcluding(profile)
         guard Set(ownerIDs).isDisjoint(with: Set(foreign.agents.map(\.id) + foreign.groups.map(\.id))),Set(topicIDs).isDisjoint(with: Set(foreign.topics.map(\.id))),Set(messageIDs).isDisjoint(with: Set(foreign.messages.map(\.id))) else { throw SyncWire.fail("同步身份与本机记录冲突，未覆盖") }
+        let retained = Set(topicIDs)
         for t in before.topics {
             try db.execute(sql: "DELETE FROM outbox WHERE id IN (SELECT id FROM messages WHERE topicID=?)",arguments: [t.id]); try db.execute(sql: "DELETE FROM messages WHERE topicID=?",arguments: [t.id])
-            try db.execute(sql: "DELETE FROM library WHERE kind='topic' AND id=?",arguments: [t.id])
+            // An unchanged topic is upserted below. Deleting it here would revoke its local media ownership.
+            if !retained.contains(t.id) { try db.execute(sql: "DELETE FROM library WHERE kind='topic' AND id=?",arguments: [t.id]) }
             // Drafts are user input: leave them intact even when a remote topic is removed.
         }
         for id in before.agents.map(\.id) { try db.execute(sql: "DELETE FROM library WHERE kind='agent' AND id=?",arguments: [id]) }

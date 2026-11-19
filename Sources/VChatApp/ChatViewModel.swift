@@ -26,6 +26,8 @@ import VChatRendering
 }
 @MainActor @Observable final class ChatRoom: Identifiable {
     let id: String
+    var mediaScope: TopicMediaScope?
+    @ObservationIgnored let layoutMemory = TranscriptLayoutMemory()
     var messages: [MessageViewModel] { didSet { depths = TurnDepths.calculate(messages.map(\.record)) } }
     var depths: [String: Int] = [:]
     var draft = ""
@@ -219,6 +221,15 @@ struct TopicDraft: Codable, Sendable {
     func authorAgent(for message: MessageViewModel) -> VCPAgent? { AgentIdentity.author(agentID: message.agentID,name: message.authorName,topicID: message.topicID,topics: topics,agents: agents,groups: groups) }
     var modelTitle: String { ModelResolution.summary(global: configuration.model,agent: activeAgent,group: activeGroup,agents: agents) }
     func displayedText(_ message: MessageViewModel) async throws -> String { try await RegexEngine.shared.apply(message.text, rules: displayRules(for: message), scope: "frontend", role: message.role, depth: rooms[message.topicID]?.depths[message.id] ?? 0) }
+    func clearDownloadedChatMedia() async throws {
+        guard let store else { throw ClientError.server("本机数据尚未就绪") }
+        try await store.clearLocalResources()
+        await NativeMediaLoader.shared.clearImageCache()
+        for (id,room) in Array(rooms) where topics.contains(where:{ $0.id==id }) {
+            room.layoutMemory.clear()
+            room.mediaScope=try await store.topicMediaScope(id)
+        }
+    }
     func saveInputPreferences() async {
         do { try await store?.put(inputPreferences, kind: "input-options", id: "keyboard") }
         catch { self.error = error.localizedDescription }
@@ -305,7 +316,13 @@ struct TopicDraft: Codable, Sendable {
             if rooms[topic.id] == nil {
                 let messages = try await store?.messages(topicID: topic.id) ?? []
                 let saved = try await store?.records(TopicDraft.self, kind: "draft").first { $0.id == topic.id }
-                let room = ChatRoom(id: topic.id, messages: messages); room.draft = saved?.text ?? ""; room.attachments = saved?.attachments ?? []; rooms[topic.id] = room
+                let room = ChatRoom(id: topic.id, messages: messages)
+                if let store { room.mediaScope = try await store.topicMediaScope(topic.id) }
+                guard openingID == opening else { return }
+                room.draft = saved?.text ?? ""; room.attachments = saved?.attachments ?? []; rooms[topic.id] = room
+            }
+            if let room=rooms[topic.id], room.mediaScope == nil, let store {
+                room.mediaScope = try await store.topicMediaScope(topic.id)
             }
             guard openingID == opening else { return }
             activeTopicID = topic.id; UserDefaults.standard.set(topic.id, forKey: "native.active-topic")

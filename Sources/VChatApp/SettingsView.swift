@@ -141,7 +141,10 @@ private struct RenderingSettings: View {
                     Text("本服务器目录：\(model.stickers.catalog?.count ?? 0) 张")
                     Button("从当前 VCP 更新目录") { updateStickers() }.disabled(updatingStickers || model.currentImageOrigin == nil)
                     Button("导入表情目录 JSON") { importingStickers=true }.disabled(updatingStickers || model.currentImageOrigin == nil)
-                    Button("清除聊天图片缓存") { Task { await NativeMediaLoader.shared.clearImageCache(); mediaNotice="聊天图片缓存已清除" } }
+                    Button("清除已下载的聊天媒体") { Task {
+                        do { try await model.clearDownloadedChatMedia(); mediaNotice="已清除下载副本，不改变消息或文件库原件" }
+                        catch { mediaNotice=error.localizedDescription }
+                    } }
                     if !mediaNotice.isEmpty { Text(mediaNotice).font(.caption).accessibilityLabel(mediaNotice) }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(18).workspaceGlass(palette)
                 .fileImporter(isPresented:$importingStickers,allowedContentTypes:[.json]) { result in

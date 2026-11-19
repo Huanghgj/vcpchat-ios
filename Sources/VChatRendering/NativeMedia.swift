@@ -63,23 +63,30 @@ public actor NativeMediaLoader {
     private var imageGeneration = UUID()
     private var bytes = 0
     private var temporary: Set<URL> = []
+    // Only the singleton production directory needs once-per-process crash cleanup.
+    private static let playbackDirectory: URL = {
+        let folder=FileManager.default.temporaryDirectory.appendingPathComponent("VChat-Playback",isDirectory:true)
+        try? FileManager.default.removeItem(at:folder)
+        return folder
+    }()
     private let videoCacheDirectory: URL?
     public init(videoCacheDirectory: URL? = nil) { self.videoCacheDirectory = videoCacheDirectory }
-    public func image(_ source: String) async throws -> MediaRaster {
+    public func image(_ source: String, owner:TopicMediaScope? = nil) async throws -> MediaRaster {
         guard MessageMedia.isSafe(source) else { throw ClientError.server("图片地址无效") }
-        if let value = cache[source], expiration[source,default: .distantPast] > Date() { recent.removeAll { $0 == source }; recent.append(source); return value }
+        let key=(owner?.token ?? "") + "\0" + source
+        if owner == nil, let value = cache[key], expiration[key,default: .distantPast] > Date() { recent.removeAll { $0 == key }; recent.append(key); return value }
         let generation = imageGeneration
         let data: Data
         var expires = Date.distantFuture
         if source.lowercased().hasPrefix("data:") { data = try Self.embedded(source) }
-        else { let reply = try await RemoteImageStore.shared.resource(URL(string: source)!); data = reply.data; expires = reply.expires }
+        else { let reply = try await RemoteImageStore.shared.resource(URL(string: source)!,owner:owner); data = reply.data; expires = reply.expires }
         try Task.checkCancellation()
         guard generation == imageGeneration else { throw CancellationError() }
-        if let value = cache[source], expiration[source,default: .distantPast] > Date() { return value }
-        if let old = cache.removeValue(forKey: source) { recent.removeAll { $0 == source }; expiration[source] = nil; bytes -= old.image.bytesPerRow * old.image.height + (old.animation?.count ?? 0) }
+        if owner == nil, let value = cache[key], expiration[key,default: .distantPast] > Date() { return value }
+        if let old = cache.removeValue(forKey: key) { recent.removeAll { $0 == key }; expiration[key] = nil; bytes -= old.image.bytesPerRow * old.image.height + (old.animation?.count ?? 0) }
         let value = try localImage(data),image = value.image,cost = image.bytesPerRow*image.height + (value.animation?.count ?? 0)
         while !recent.isEmpty && (recent.count >= 8 || bytes+cost > 32_000_000) { let old = recent.removeFirst(); expiration[old] = nil; if let v = cache.removeValue(forKey: old) { bytes -= v.image.bytesPerRow*v.image.height + (v.animation?.count ?? 0) } }
-        if cost <= 32_000_000 && expires > Date() { expiration[source] = expires; cache[source] = value; recent.append(source); bytes += cost }; return value
+        if owner == nil && cost <= 32_000_000 && expires > Date() { expiration[key] = expires; cache[key] = value; recent.append(key); bytes += cost }; return value
     }
     public func clearImageCache() async {
         imageGeneration = UUID(); cache.removeAll(); expiration.removeAll(); recent.removeAll(); bytes = 0
@@ -92,9 +99,22 @@ public actor NativeMediaLoader {
         let animated = CGImageSourceGetCount(input) > 1 && [UTType.gif.identifier,UTType.png.identifier,UTType.webP.identifier].contains(CGImageSourceGetType(input) as String? ?? "")
         return MediaRaster(image: image,animation: animated ? data : nil)
     }
-    public func video(_ source: String) throws -> VideoResource {
+    public func video(_ source: String, owner:TopicMediaScope? = nil) async throws -> VideoResource {
         guard MessageMedia.isSafe(source) else { throw ClientError.server("视频地址无效") }
-        if !source.lowercased().hasPrefix("data:") { return VideoResource(url: URL(string: source)!,temporary: false) }
+        if !source.lowercased().hasPrefix("data:") {
+            let url = URL(string:source)!
+            guard let owner, MessageMedia.isVideo(source) else { return VideoResource(url:url,temporary:false) }
+            let movie:TopicResource
+            do { movie=try await TopicVideoStore.shared.resource(url,owner:owner) }
+            catch is CancellationError { throw CancellationError() }
+            catch let error as URLError where error.code == .dataLengthExceedsMaximum { return VideoResource(url:url,temporary:false) }
+            try Task.checkCancellation()
+            let folder=videoCacheDirectory ?? Self.playbackDirectory
+            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+            let file=folder.appendingPathComponent(UUID().uuidString).appendingPathExtension(TopicVideoStore.fileExtension(movie.mime))
+            try movie.data.write(to:file,options:.atomic); temporary.insert(file)
+            return VideoResource(url:file,temporary:true)
+        }
         let data = try Self.embedded(source),mime = String(source.dropFirst(5).prefix(while: { $0 != ";" })).lowercased()
         guard mime.hasPrefix("video/") else { throw ClientError.server("视频类型无效") }
         let folder = try videoCacheDirectory ?? FileManager.default.url(for: .cachesDirectory,in: .userDomainMask,appropriateFor: nil,create: true).appendingPathComponent((Bundle.main.bundleIdentifier ?? "VChatNative") + "/Media",isDirectory: true)
