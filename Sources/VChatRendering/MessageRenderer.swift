@@ -24,13 +24,22 @@ public actor MessageRenderer {
         try Task.checkCancellation()
         let filtered = rules.isEmpty ? source : try await RegexEngine.shared.apply(source, rules: rules, scope: "frontend", role: role, depth: depth)
         guard options.enabled else { return [.literal(filtered)] }
+        let regexOutput = filtered != source
+        // A replacement elsewhere in the reply must not promote previously inline
+        // markup to a full-width web view. Compare whole paired fragments, not names.
+        var unchangedFragments = Set<String>()
+        if regexOutput, source.contains("<") {
+            for part in HTMLIslandPolicy.extractSections(from:source,regexOutput:true) {
+                if case .island(let html) = part { unchangedFragments.insert(html) }
+            }
+        }
         let source = options.media ? LooseImageTags.normalize(filtered) : filtered
         self.streaming = streaming
         var output: [RenderBlock] = []
-        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.localizedCaseInsensitiveContains("<div"), streaming: streaming) {
+        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.contains("<"), streaming: streaming) {
             switch segment {
             case .text(let prose):
-                for section in HTMLIslandPolicy.extractSections(from: prose) {
+                for section in HTMLIslandPolicy.extractSections(from:prose, regexOutput:regexOutput, streaming:streaming, unchangedFragments:unchangedFragments) {
                     switch section {
                     case .island(let html):
                         output.append(options.html ? .html(html) : .literal(html))
@@ -127,13 +136,15 @@ public actor MessageRenderer {
                 }
             } else if let html = child as? InlineHTML,options.media,let media = MessageMedia.html(html.rawHTML) {
                 flush(); result.append(.media(media))
+            } else if let tag=child as? InlineHTML, tag.rawHTML.range(of:#"(?i)^<br\s*/?\s*>$"#,options:.regularExpression) != nil {
+                flush(); result.append(.text(AttributedString("\n")))
             } else if containsMedia(child,videos: options.media) { flush(); result += inline(child,options: options) }
             else { buffer += child.detachedFromParent.format() }
         }
         flush(); return result
     }
     private func containsMedia(_ node: any Markup,videos: Bool) -> Bool {
-        node is Markdown.Image || (videos && (node as? Markdown.Link).map { MessageMedia.isVideo($0.destination ?? "") } == true) || node.children.contains { containsMedia($0,videos: videos) }
+        node is Markdown.Image || (videos && (node as? InlineHTML).flatMap { MessageMedia.html($0.rawHTML) } != nil) || (videos && (node as? Markdown.Link).map { MessageMedia.isVideo($0.destination ?? "") } == true) || node.children.contains { containsMedia($0,videos: videos) }
     }
     private func inlineSource(_ source: String,options: RenderOptions) -> [InlineRun] {
         var attributed = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source)

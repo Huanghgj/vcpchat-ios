@@ -87,6 +87,175 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(VCPMarkup.parse(inline),[.text(inline)])
     }
 
+    // The list supplies a finite width; its one-line label environment must not
+    // leak into message prose. Compare identical folded headers/images, so the
+    // measured difference can only come from the visible, wrapped body text.
+    @MainActor func testLongMixedParagraphWrapsBetweenReasoningAndSticker() async throws {
+        let file = "GEM_PHOTO_" + String(repeating: "1A2965D5", count: 14) + "_FINAL.PNG"
+        let chinese = String(repeating: "这段回复应该在手机气泡内一直换行直到", count: 5) + "最后一字。"
+        let captions = ["短句", chinese, file]
+        let tag = #"<img width="36" alt="合成表情" src="data:image/png;base64,\#(pixelPNG(.green).base64EncodedString())">"#
+        let renderer = MessageRenderer()
+        for caption in captions {
+            let blocks = try await renderer.render(caption + " " + tag, options: .init(), dark: false)
+            let shown = blocks.flatMap { block -> [InlineRun] in
+                if case .paragraph(let runs) = block { return runs }
+                return []
+            }
+            let visibleText = shown.compactMap { run -> String? in
+                if case .text(let value) = run { return String(value.characters) }; return nil
+            }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(visibleText, caption, "Parser lost or shortened text before the sticker")
+            XCTAssertEqual(shown.filter { if case .media = $0 { return true }; return false }.count, 1)
+        }
+
+        let probe = MixedHeightProbe()
+        let window = try host(ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(captions.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 6) {
+                        DisclosureGroup("思考过程", isExpanded: .constant(false)) { Text("折叠的推理") }
+                        RichMessageBody(captions[index] + " " + tag, expandsToFill: true)
+                    }
+                    .font(.system(size: 17))
+                    .lineLimit(1)
+                    .environment(\.scenePhase, .active)
+                    .environment(\.messageTextSelectionEnabled, false)
+                    .frame(width: 214, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
+                        probe.heights[index] = h
+                    }
+                }
+            }
+        })
+        defer { window.isHidden = true }
+        try await eventually("Chinese and uninterrupted filename both grow by several visible lines above the 36pt sticker") {
+            guard let short = probe.heights[0], short > 55,
+                  let paragraph = probe.heights[1], let filename = probe.heights[2] else { return false }
+            return paragraph > short + 50 && filename > short + 35
+        }
+    }
+
+    @MainActor func testAttachmentFilenameUsesMoreThanOneLineInHistory() {
+        let name = "GEM_PHOTO_" + String(repeating: "9B641CD8", count: 14) + "_END.GIF"
+        func height(_ name: String) -> CGFloat {
+            let item = ChatAttachment(name: name, mime: "image/gif", kind: "image")
+            let view = AttachmentStrip(attachments: [item]).frame(width: 218)
+            return UIHostingController(rootView: view).sizeThatFits(in: CGSize(width: 218, height: 700)).height
+        }
+        let short = height("short.gif"), long = height(name)
+        XCTAssertGreaterThan(short, 10)
+        XCTAssertGreaterThan(long, short + 25, "A sent attachment's full filename must wrap within the bubble")
+    }
+
+    func testDisplayRulesRenderOrdinaryPairedHTMLBesideTextAndAnImage() async throws {
+        var card = RegexRule()
+        card.findPattern = #"/\[卡:([^\]]+)\]/g"#
+        card.replaceWith = #"<details data-note="a > b"><summary>角色</summary><strong>$1</strong></details>"#
+        let image = "![合成表情](https://fixtures.invalid/img/sample.png)"
+        let original = "前文[卡:星河]后文 " + image
+        let renderer = MessageRenderer()
+        for live in [true, false] {
+            let blocks = try await renderer.render(original, options: .init(), dark: false, streaming: live, rules: [card])
+            let cards = blocks.compactMap { block -> String? in if case .html(let body) = block { return body }; return nil }
+            XCTAssertEqual(cards, [card.replaceWith.replacingOccurrences(of: "$1", with: "星河")])
+            guard let i = blocks.firstIndex(where: { if case .html = $0 { return true }; return false }) else { return }
+            func inline(_ range: ArraySlice<RenderBlock>) -> [InlineRun] {
+                range.flatMap { if case .paragraph(let runs) = $0 { return runs }; return [] }
+            }
+            let before = inline(blocks[..<i]), after = inline(blocks[(i + 1)...])
+            XCTAssertTrue(before.contains { if case .text(let t) = $0 { return String(t.characters).contains("前文") }; return false })
+            XCTAssertTrue(after.contains { if case .text(let t) = $0 { return String(t.characters).contains("后文") }; return false })
+            XCTAssertEqual(after.compactMap { if case .media(let m) = $0 { return m.source }; return nil }, ["https://fixtures.invalid/img/sample.png"])
+        }
+        var disabled = RenderOptions(); disabled.html = false
+        let disabledBlocks = try await renderer.render(original, options: disabled, dark: false, rules: [card])
+        XCTAssertFalse(disabledBlocks.contains { if case .html = $0 { return true }; return false })
+        let changed = try await RegexEngine().apply(original, rules: [card], scope: "context", role: "assistant")
+        XCTAssertEqual(changed, original, "A display card must not turn into prompt HTML")
+    }
+
+    func testUnrelatedDisplayReplacementDoesNotPromoteExistingInlineHTML() async throws {
+        let original = "原始<span>原样</span>相邻，卡片标记"
+        let renderer = MessageRenderer()
+        var rule = RegexRule(); rule.findPattern = "卡片标记"
+        for template in ["改过的正文", "<details><summary>标题</summary>新卡片</details>"] {
+            rule.replaceWith = template
+            let blocks = try await renderer.render(original, options: .init(), dark: false, rules: [rule])
+            let html = blocks.compactMap { block -> String? in if case .html(let s) = block { return s }; return nil }
+            XCTAssertEqual(html, template.hasPrefix("<") ? [template] : [], "Only newly introduced inline HTML should be promoted")
+            let text = blocks.flatMap { block -> [String] in
+                guard case .paragraph(let runs) = block else { return [] }
+                return runs.compactMap { if case .text(let t) = $0 { return String(t.characters) }; return nil }
+            }.joined()
+            for piece in ["原始", "原样", "相邻"] { XCTAssertTrue(text.contains(piece), "Original surrounding text was lost: " + piece) }
+        }
+    }
+
+    @MainActor func testRegexDetailsOutputCanActuallyOpenInItsWebView() async throws {
+        var rule = RegexRule(); rule.findPattern = #"/\[状态:(.*?)\]/g"#
+        rule.replaceWith = #"<details id="fixture-regex-details" title="a > b"><summary>状态</summary><p>$1</p></details>"#
+        let window = try host(RichMessageBody("前文[状态:星河]后文", rules: [rule]).environment(\.scenePhase, .active))
+        defer { window.isHidden = true }
+        try await eventually("regex-produced card mounted its own WKWebView") { self.find(WKWebView.self, in: window) != nil }
+        let web = try XCTUnwrap(find(WKWebView.self, in: window))
+        let clock = ContinuousClock(), deadline = clock.now + .seconds(60)
+        while web.isLoading || web.url == nil {
+            guard clock.now < deadline else { return XCTFail("Regex card page did not finish loading") }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        _ = try await observeIsland(web, "regex capture rendered in a working HTML disclosure", condition: """
+        const card = document.getElementById('fixture-regex-details');
+        if (!card || card.querySelector('p')?.textContent !== '星河') return false;
+        if (card.title !== 'a > b' || card.querySelector('summary')?.textContent !== '状态')
+            throw new Error('HTML attributes or summary changed');
+        if (!card.open) card.querySelector('summary').click();
+        return card.open && card.querySelector('p').getBoundingClientRect().height > 0;
+        """)
+    }
+
+    func testDisplayRegexLeavesReceiptsIntactAndContinuesAfterInvalidRule() async throws {
+        var broken = RegexRule(); broken.findPattern = "/(/g"; broken.title = "损坏的规则"
+        var a = RegexRule(); a.findPattern = "READY"; a.replaceWith = "stage1"
+        var b = RegexRule(); b.findPattern = "stage1"; b.replaceWith = "完成"
+        var context = RegexRule(); context.findPattern = "READY"; context.replaceWith = "提示词"; context.applyToFrontend = false; context.applyToContext = true
+        a.minDepth = 1; a.maxDepth = 2; b.minDepth = 1; b.maxDepth = 2
+        let raw = "READY\n" + batch("READY", id: receiptID) + "\nREADY"
+        let renderer = MessageRenderer(), rules = [broken, a, b, context]
+        let displayed = try await renderer.render(raw, options: .init(), dark: false, rules: rules, role: "assistant", depth: 1)
+        let text = displayed.flatMap { block -> [String] in
+            guard case .paragraph(let runs) = block else { return [] }
+            return runs.compactMap { if case .text(let t) = $0 { return String(t.characters) }; return nil }
+        }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.joined()
+        XCTAssertEqual(text, "完成完成")
+        XCTAssertTrue(displayed.contains(.vcp(.batch([.note("READY")], true))), "Display replacements must not rewrite the authenticated receipt boundary or payload")
+        for (role, depth) in [("user", 1), ("assistant", 3)] {
+            let blocks = try await renderer.render("READY", options: .init(), dark: false, rules: rules, role: role, depth: depth)
+            guard case .paragraph(let runs) = blocks.first, case .text(let t) = runs.first else { return XCTFail("Expected original prose") }
+            XCTAssertEqual(String(t.characters), "READY")
+        }
+        let prompt = try await RegexEngine().apply("READY", rules: [a, b, context], scope: "context", role: "assistant", depth: 1)
+        XCTAssertEqual(prompt, "提示词")
+    }
+
+    func testHTMLRuleInsideCodeRemainsALiteralExample() async throws {
+        var rule = RegexRule(); rule.findPattern = "TOKEN"; rule.replaceWith = "<section><b>示例</b></section>"
+        let fenced = String(repeating: "`", count: 3)
+        let source = fenced + "html\nTOKEN\n" + fenced + "\n\n\u{60}TOKEN\u{60}\n\nTOKEN"
+        let blocks = try await MessageRenderer().render(source, options: .init(), dark: false, rules: [rule])
+        let html = blocks.filter { if case .html = $0 { return true }; return false }
+        XCTAssertEqual(html.count, 1, "Only the unfenced occurrence becomes a card")
+        XCTAssertTrue(blocks.contains { if case .code("html", let literal, _) = $0 { return !literal.isEmpty }; return false })
+        let hasInlineExample = blocks.contains { block in
+            guard case .paragraph(let runs) = block else { return false }
+            return runs.contains { run in
+                guard case .text(let text) = run else { return false }
+                return text.runs.contains { $0.inlinePresentationIntent?.contains(.code) == true }
+            }
+        }
+        XCTAssertTrue(hasInlineExample, "The inline code sample must remain a code span")
+    }
+
     @MainActor func testStandaloneRoleMarkerCannotGrowIntoAnEmptyPanel() {
         let content=VCPCardView(segment:.divider("user",false),options:.init())
         let controller=UIHostingController(rootView:content)
@@ -656,6 +825,8 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(extraDownloads, 0, "new ephemeral WebKit and native store must reload from disk while offline")
     }
 }
+
+@MainActor private final class MixedHeightProbe { var heights: [Int: CGFloat] = [:] }
 
 @MainActor private final class KeyboardFixtureState: ObservableObject {
     @Published var draft = "草稿"

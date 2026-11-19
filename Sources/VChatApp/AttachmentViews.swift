@@ -174,23 +174,33 @@ struct AttachmentStrip: View {
     let attachments: [ChatAttachment]
     var remove: ((String) -> Void)?
     @State private var preview: ChatAttachment?
-    var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 10) {
-                ForEach(attachments) { item in
-                    HStack(spacing: 8) {
-                        Button { preview = item } label: {
-                            HStack(spacing: 8) {
-                                if let source = item.dataUrl { NativeRaster(source).frame(width: 46, height: 46).clipShape(RoundedRectangle(cornerRadius: 8)) }
-                                else { Image(systemName: item.desktopOnly == true ? "icloud.and.arrow.down" : "doc.text").font(.title3) }
-                                VStack(alignment: .leading) { Text(item.name).lineLimit(1); if item.desktopOnly == true { Text("原文件待下载").font(.caption2).foregroundStyle(.secondary) } }
-                            }
-                        }.buttonStyle(.plain)
-                        if let remove { Button { remove(item.id) } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).accessibilityLabel("移除附件 \(item.name)") }
-                    }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+    @ViewBuilder private func attachment(_ item: ChatAttachment, compact: Bool) -> some View {
+        HStack(spacing:8) {
+            Button { preview=item } label: {
+                HStack(spacing:8) {
+                    if let source=item.dataUrl { NativeRaster(source).frame(width:46,height:46).clipShape(RoundedRectangle(cornerRadius:8)) }
+                    else { Image(systemName:item.desktopOnly == true ? "icloud.and.arrow.down" : "doc.text").font(.title3) }
+                    VStack(alignment:.leading) {
+                        Text(verbatim:item.name)
+                            .lineLimit(compact ? 1 : nil)
+                            .fixedSize(horizontal:false,vertical:true)
+                        if item.desktopOnly == true { Text("原文件待下载").font(.caption2).foregroundStyle(.secondary) }
+                    }
                 }
+            }.buttonStyle(.plain)
+            if let remove { Button { remove(item.id) } label: { Image(systemName:"xmark.circle.fill") }.buttonStyle(.plain).accessibilityLabel("移除附件 " + item.name) }
+        }.padding(10).background(.regularMaterial,in:RoundedRectangle(cornerRadius:12))
+    }
+    var body: some View {
+        Group {
+            if remove != nil { // The draft tray is horizontal; sent filenames wrap within the bubble.
+                ScrollView(.horizontal) {
+                    HStack(spacing:10) { ForEach(attachments) { attachment($0,compact:true) } }
+                }
+            } else {
+                VStack(alignment:.leading,spacing:8) { ForEach(attachments) { attachment($0,compact:false) } }
             }
-        }.sheet(item: $preview) { AttachmentPreview(item: $0) }
+        }.sheet(item:$preview) { AttachmentPreview(item:$0) }
     }
 }
 struct AttachmentPreview: View {

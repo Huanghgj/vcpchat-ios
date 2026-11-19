@@ -49,12 +49,28 @@ public actor RegexEngine {
     }
     public func validate(_ pattern: String) throws { _ = try call("vcpValidate", [pattern]) }
     public func apply(_ text: String, rules: [RegexRule], scope: String, role: String, depth: Int = 0) throws -> String {
-        var text = text
-        for rule in rules where rule.enabled && rule.applyToRoles.contains(role) && (scope == "frontend" ? rule.applyToFrontend : rule.applyToContext) && (rule.minDepth < 0 || depth >= rule.minDepth) && (rule.maxDepth < 0 || depth <= rule.maxDepth) {
-            do { text = try call("vcpReplace", [text, rule.findPattern, rule.replaceWith]).toString() ?? text }
+        let display = scope == "frontend"
+        let active = rules.filter { rule in
+            rule.enabled && !rule.findPattern.isEmpty && rule.applyToRoles.contains(role)
+            && (display ? rule.applyToFrontend : rule.applyToContext)
+            && (rule.minDepth < 0 || depth >= rule.minDepth) && (rule.maxDepth < 0 || depth <= rule.maxDepth)
+        }
+        guard !active.isEmpty else { return text }
+        if display {
+            return ToolBatchMarkup.mapProse(text) { prose in
+                active.reduce(prose) { current, rule in
+                    // A broken synced/imported display rule must not hide the message
+                    // or prevent later valid rules from being applied.
+                    (try? self.call("vcpReplace", [current,rule.findPattern,rule.replaceWith]).toString()) ?? current
+                }
+            }
+        }
+        var result = text
+        for rule in active {
+            do { result = try call("vcpReplace", [result,rule.findPattern,rule.replaceWith]).toString() ?? result }
             catch { throw ClientError.server("「\(rule.title)」：\(error.localizedDescription)") }
         }
-        return text
+        return result
     }
     public func importFile(_ url: URL) throws -> [RegexRule] {
         let granted = url.startAccessingSecurityScopedResource(); defer { if granted { url.stopAccessingSecurityScopedResource() } }
