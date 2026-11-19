@@ -85,6 +85,7 @@ public actor ChatStore {
                 t.primaryKey(["archiveID","kind","id"])
             }
         }
+        migrations.registerMigration("native-v7-topic-media") { db in try Self.installTopicMedia(db) }
         try migrations.migrate(pool)
     }
     public static func open(path: String) async throws -> ChatStore { try ChatStore(path: path) }

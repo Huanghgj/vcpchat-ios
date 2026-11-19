@@ -20,8 +20,11 @@ struct CachedRemoteImage: Sendable {
 actor RemoteImageStore {
     static let shared: RemoteImageStore = {
         let http = VCPHTTP(allowingRedirects: false)
-        return RemoteImageStore(directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("VChat-MessageImages-v1", isDirectory: true)) { url in
+        let base=FileManager.default.urls(for:.cachesDirectory,in:.userDomainMask)[0]
+        // v1 had no owners or original cache-control metadata. Do not retain untracked
+        // copies after a conversation is removed. New non-chat previews are isolated.
+        try? FileManager.default.removeItem(at:base.appendingPathComponent("VChat-MessageImages-v1",isDirectory:true))
+        return RemoteImageStore(directory:base.appendingPathComponent("VChat-PreviewImages-v2", isDirectory:true)) { url in
             let r = try await http.response(url, limit: 20_000_000)
             return RemoteImageReply(data: r.data, status: r.status, cacheControl: r.cacheControl)
         }
@@ -31,6 +34,54 @@ actor RemoteImageStore {
     private let fetch: @Sendable (URL) async throws -> RemoteImageReply
     private var pending: [String: Task<CachedRemoteImage, any Error>] = [:]
     private var generation = UUID()
+    private struct Flight {
+        let task:Task<(TopicResource,Bool),any Error>
+        var readers:Int
+    }
+    private var archiveFlights:[String:Flight] = [:]
+    static func key(_ url:URL) -> String {
+        var parts=URLComponents(url:url,resolvingAgainstBaseURL:false)
+        parts?.fragment=nil
+        return SHA256.hash(data:Data((parts?.url ?? url).absoluteString.utf8)).map { String(format:"%02x",$0) }.joined()
+    }
+    static func mayArchive(_ control:String) -> Bool {
+        let names=control.lowercased().split(separator:",").map { $0.components(separatedBy:"=")[0].trimmingCharacters(in:.whitespaces) }
+        return !names.contains("no-store") && !names.contains("no-cache") && !names.contains("must-revalidate") && !names.contains("proxy-revalidate")
+    }
+
+    /// The database owns topic copies. Never seed an unowned HTTP cache on this path.
+    private func archivedImage(_ url:URL, owner:TopicMediaScope) async throws -> CachedRemoteImage {
+        let id=Self.key(url)
+        if let existing=try await owner.store.localResource(key:id,owner:owner.token) {
+            return CachedRemoteImage(data:existing.data,mime:existing.mime,expires:.distantFuture)
+        }
+        let flight:Task<(TopicResource,Bool),any Error>
+        let epoch=generation
+        if var old=archiveFlights[id] { old.readers += 1;archiveFlights[id]=old;flight=old.task }
+        else {
+            flight=Task {
+                let reply=try await fetch(url)
+                try Task.checkCancellation()
+                guard reply.status==200 else { throw ClientError.http(reply.status) }
+                guard let mime=Self.imageType(reply.data),
+                      let source=CGImageSourceCreateWithData(reply.data as CFData,nil),
+                      let props=CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [CFString:Any],
+                      let w=props[kCGImagePropertyPixelWidth] as? NSNumber, let h=props[kCGImagePropertyPixelHeight] as? NSNumber else { throw ClientError.server("无法读取图片尺寸") }
+                let orientation=(props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+                let swapped=(5...8).contains(orientation)
+                return (TopicResource(data:reply.data,mime:mime,width:(swapped ? h : w).intValue,height:(swapped ? w : h).intValue),Self.mayArchive(reply.cacheControl))
+            }
+            archiveFlights[id]=Flight(task:flight,readers:1)
+        }
+        defer {
+            if generation==epoch, var live=archiveFlights[id] {
+                live.readers -= 1;archiveFlights[id] = live.readers>0 ? live : nil
+            }
+        }
+        let (resource,persist)=try await flight.value
+        if persist { try await owner.store.saveLocalResource(resource,key:id,owner:owner.token) }
+        return CachedRemoteImage(data:resource.data,mime:resource.mime,expires:persist ? .distantFuture : .distantPast)
+    }
     private var index: [URL:(size:Int, used:Date)] = [:]
     private var indexed = false
     private var diskBytes = 0
@@ -40,14 +91,15 @@ actor RemoteImageStore {
         self.directory = directory; self.fetch = fetch
     }
 
-    func resource(_ url: URL) async throws -> CachedRemoteImage {
+    func resource(_ url: URL, owner:TopicMediaScope? = nil) async throws -> CachedRemoteImage {
         guard MessageMedia.isSafe(url.absoluteString), ["https","http"].contains(url.scheme?.lowercased() ?? "") else {
             throw ClientError.server("图片地址无效")
         }
         var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
         parts?.fragment = nil
         guard let canonical = parts?.url else { throw ClientError.invalidConfiguration }
-        let id = SHA256.hash(data: Data(canonical.absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
+        if let owner { return try await archivedImage(canonical,owner:owner) }
+        let id = Self.key(canonical)
         if let task = pending[id] { return try await task.value }
         let file = directory.appendingPathComponent(id)
         if let cached = read(file) { return cached }
@@ -160,7 +212,7 @@ actor RemoteImageStore {
     }
 
     func clear() {
-        generation = UUID(); for task in pending.values { task.cancel() }; pending.removeAll()
+        generation = UUID(); for flight in archiveFlights.values { flight.task.cancel() }; archiveFlights.removeAll(); for task in pending.values { task.cancel() }; pending.removeAll()
         index.removeAll(); diskBytes=0; indexed=false
         try? FileManager.default.removeItem(at: directory)
     }
