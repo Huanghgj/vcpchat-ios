@@ -47,35 +47,37 @@ public enum HTMLIslandPolicy {
         return false
     }
     public static func containsIsland(_ source: String) -> Bool {
-        guard source.contains("vcp-root") else { return false }
+        guard source.localizedCaseInsensitiveContains("<div") else { return false }
         let sections = extractSections(from: source)
         return sections.contains { if case .island = $0 { return true }; return false }
     }
 
     /// Extract mixed markdown and embedded HTML visual islands from prose.
     public static func extractSections(from source: String) -> [IslandSection] {
-        guard source.contains("vcp-root") else { return [.markdown(source)] }
+        guard source.localizedCaseInsensitiveContains("<div") else { return [.markdown(source)] }
         let s = source as NSString
-        let fences = codeFences(source)
-        let rootPattern = #"(?i)<div\b(?:"[^"]*"|'[^']*'|[^'">])*?\bid\s*=\s*(?:"vcp-root"|'vcp-root'|vcp-root)(?=[\s>])(?:"[^"]*"|'[^']*'|[^'">])*?>"#
-        guard let rootRegex = try? NSRegularExpression(pattern: rootPattern) else { return [.markdown(source)] }
-        let matches = rootRegex.matches(in: source, range: NSRange(location: 0, length: s.length))
-        guard !matches.isEmpty else { return [.markdown(source)] }
-
+        let literalRanges = (codeFences(source) + opaqueDomains.matches(in:source,range:NSRange(location:0,length:s.length)).map(\.range)).sorted { $0.location < $1.location }
+        var literalIndex = 0
+        let matches = openingDiv.matches(in:source,range:NSRange(location:0,length:s.length))
         var sections: [IslandSection] = []
         var cursor = 0
-
-
-        // The old single-root renderer passed the whole fragment to WebKit,
-        // including any closing scripts or styles after the root.
-        if matches.count == 1, accepts(source) { return [.island(source)] }
-
         for m in matches {
             let divStart = m.range.location
             if divStart < cursor { continue }
+            if divStart > 0, s.character(at:divStart-1) == 92 { continue }
+            var precedingSpace=divStart
+            while precedingSpace > 0, [9,32].contains(s.character(at:precedingSpace-1)) { precedingSpace -= 1 }
+            if precedingSpace == 0 || s.character(at:precedingSpace-1) == 10 {
+                let indentation=s.substring(with:NSRange(location:precedingSpace,length:divStart-precedingSpace))
+                if indentation.contains("\t") || indentation.count >= 4 { continue }
+            }
             // Skip root divs inside code fences
-            if fences.contains(where: { NSLocationInRange(divStart, $0) }) { continue }
-            guard accepts(s.substring(with: m.range)) else { continue }
+            while literalIndex < literalRanges.count, NSMaxRange(literalRanges[literalIndex]) <= divStart { literalIndex += 1 }
+            if literalIndex < literalRanges.count, NSLocationInRange(divStart,literalRanges[literalIndex]) { continue }
+            let opening=s.substring(with:m.range)
+            let explicit=accepts(opening)
+            let startOfLine = divStart==0 || s.character(at:divStart-1)==10
+            guard explicit || startOfLine else { continue }
 
             // Pull in preceding <style>...</style> if tightly attached
             let islandStart = findStylePrefix(in: s, after: cursor, before: divStart)
@@ -84,6 +86,12 @@ public enum HTMLIslandPolicy {
             let divOpenEnd = NSMaxRange(m.range)
             let divEnd = balanceDiv(in: s, from: divOpenEnd)
             let islandEnd = attachedScriptsEnd(in: s, from: divEnd)
+            if !explicit {
+                guard islandEnd-divStart <= 256*1024 else { continue }
+                let card=s.substring(with:NSRange(location: divStart,length:islandEnd-divStart))
+                guard card.utf8.count<=256*1024,
+                      card.range(of:#"(?i)<(?:canvas|script|style|img|svg)\b"#,options:.regularExpression) != nil else { continue }
+            }
 
             let preceding = s.substring(with: NSRange(location: cursor, length: islandStart - cursor))
             if !preceding.isEmpty {
@@ -104,7 +112,9 @@ public enum HTMLIslandPolicy {
         return sections.isEmpty ? [.markdown(source)] : sections
     }
 
-    private static func codeFences(_ source: String) -> [NSRange] {
+    private static let opaqueDomains = try! NSRegularExpression(pattern: #"(?is)<!--.*?(?:-->|$)|<(script|style|code|pre|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>.*?(?:</\1\s*>|$)|(`+)(?!`).*?\2(?!`)"#)
+    private static let openingDiv = try! NSRegularExpression(pattern: #"(?i)<div\b(?:"[^"]*"|'[^']*'|[^'">])*>"#)
+    static func codeFences(_ source: String) -> [NSRange] {
         var ranges: [NSRange] = []; var opened: (Int, String, Int)?; var offset = 0
         let s = source as NSString
         for raw in source.components(separatedBy: "\n") {
@@ -181,11 +191,11 @@ public enum HTMLIslandPolicy {
 
     public static func document(_ source: String, motion: Bool, media: Bool, dark: Bool, emphasisColor: String? = nil) -> String {
         let color = dark ? "dark" : "light"
-        let image = media ? "https: data:" : "'none'"
+        let image = media ? "https: data: vchat-image:" : "'none'"
         let emphasis = emphasisColor ?? (dark ? "#88d6b0" : "#278752")
         let noMotion = motion ? "" : "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}"
         return """
-        <!doctype html><html data-vcp-host-theme="\(color)"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(image); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
+        <!doctype html><html data-vcp-host-theme="\(color)"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(media ? "https: data:" : "'none'"); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
         """
     }
 }
@@ -216,6 +226,7 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
         if let reusable = idle.popLast() { view = reusable }
         else {
             let config = WKWebViewConfiguration(); config.websiteDataStore = .nonPersistent()
+            config.setURLSchemeHandler(IslandImageScheme(),forURLScheme:IslandImageScheme.name)
             config.preferences.javaScriptCanOpenWindowsAutomatically = false
             #if os(iOS)
             config.allowsInlineMediaPlayback = true; config.mediaTypesRequiringUserActionForPlayback = .all
@@ -234,7 +245,7 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     }
     func release(_ id: UUID) {
         guard let view = active.removeValue(forKey: id) else { return }
-        view.stopLoading(); view.setAllMediaPlaybackSuspended(true)
+        view.stopLoading(); (view.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme)?.invalidate(); view.setAllMediaPlaybackSuspended(true)
         view.navigationDelegate = nil; view.uiDelegate = nil
         view.configuration.userContentController.removeAllScriptMessageHandlers()
         view.configuration.userContentController.removeAllUserScripts()
@@ -257,12 +268,15 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     @ObservationIgnored private var latest: Input?
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var updateTask: Task<Void,Never>?
-    func mount(_ document: String, source: String, streaming: Bool, media: Bool) {
+    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext) {
         guard let runtime = IslandScripts.runtime else { failed = true; failureMessage = "气泡渲染组件缺失，请更新 App"; return }
         guard let web = view ?? IslandPool.shared.take(id) else { return }
+        let imageScheme=web.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme
+        let contextChanged=imageScheme?.stickers != stickers
+        imageScheme?.stickers=stickers;imageScheme?.mediaEnabled=media
         let input = Input(source: source,streaming: streaming)
-        let editingCompleted = latest.map { !$0.streaming && !input.streaming && $0.source != input.source } ?? false
-        if view != nil,self.document == document,!editingCompleted {
+        let editingCompleted = latest.map { $0.source != input.source && (!$0.streaming || !input.source.hasPrefix($0.source)) } ?? false
+        if view != nil,self.document == document,!editingCompleted,!contextChanged {
             if latest != input { latest = input; pending = input; drain() }
             return
         }
@@ -335,6 +349,7 @@ struct HTMLIsland: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var phase
+    @Environment(\.stickerContext) private var stickers
     @Environment(\.messageLongPressAction) private var showMessageActions
     private var visible: Bool { appeared && phase == .active && (viewport?.intersects(bounds) ?? true) }
     private var document: String {
@@ -352,12 +367,13 @@ struct HTMLIsland: View {
         .onGeometryChange(for: CGRect.self,of: { $0.frame(in: .named("vcp-message-viewport")) }) { bounds = $0 }
         .onAppear { appeared = true; refresh() }.onDisappear { appeared = false; controller.unmount() }
         .onChange(of: visible) { _, _ in refresh() }
+        .onChange(of: stickers) { _, _ in refresh() }
         .onChange(of: document) { _, _ in refresh() }
         .onChange(of: source) { _, _ in refresh() }
         .onChange(of: streaming) { _, _ in refresh() }
         .onChange(of: IslandPool.shared.revision) { _, _ in if visible && controller.view == nil && !controller.failed { refresh() } }
     }
-    private func refresh() { if visible { controller.mount(document,source: source,streaming: streaming,media: options.media) } else { controller.unmount() } }
+    private func refresh() { if visible { controller.mount(document,source: source,streaming: streaming,media: options.media,stickers: stickers) } else { controller.unmount() } }
 }
 // WebKit consumes SwiftUI ancestor gestures. Keep the recognizer native and
 // remove only this host's recognizer when the pooled view is released.

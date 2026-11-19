@@ -35,7 +35,7 @@ public actor VCPHTTP {
         return try JSONDecoder().decode(JSONValue.self,from: data)
     }
 }
-public struct HTTPDataReply: Sendable { public var data: Data; public var status: Int; public var contentType: String }
+public struct HTTPDataReply: Sendable { public var data: Data; public var status: Int; public var contentType: String; public var cacheControl: String = "" }
 extension VCPHTTP {
     public func response(_ url: URL,method: String = "GET",headers: [String:String] = [:],body: Data? = nil,limit: Int = 20_000_000) async throws -> HTTPDataReply {
         var request = URLRequest(url: url); request.httpMethod = method; request.httpBody = body
@@ -43,6 +43,7 @@ extension VCPHTTP {
         let (stream,response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClientError.invalidResponse }
         var data = Data(); for try await byte in stream { try Task.checkCancellation(); data.append(byte); guard data.count <= limit else { throw ClientError.server("服务器响应超过允许大小") } }
-        return HTTPDataReply(data: data,status: http.statusCode,contentType: http.value(forHTTPHeaderField: "Content-Type") ?? "")
+        let control = http.value(forHTTPHeaderField: "Vary")?.trimmingCharacters(in: .whitespaces) == "*" ? "no-store" : http.value(forHTTPHeaderField: "Cache-Control") ?? ""
+        return HTTPDataReply(data: data,status: http.statusCode,contentType: http.value(forHTTPHeaderField: "Content-Type") ?? "",cacheControl: control)
     }
 }
