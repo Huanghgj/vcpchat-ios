@@ -20,6 +20,6 @@ VPS 不做需要持续或高峰 CPU 的工作：不在上面编译、跑无头�
 4. **审查最新提交。** 看代码差异、GitHub 审查意见和最新提交对应的检查。报告分别写清“编译”“模拟器启动”“测试”“IPA”“真机”的结果；一项成功不能代替下一项。失败时先读第一个出错步骤及对应日志。没分到运行器，可以稍后重试同一提交；有编译、链接或断言错误，先修原因再重跑。没有 IPA 可能只是前面的测试失败，并非打包本身坏了。
 5. **只在准备装机时安排出包。** 选一个通过相关测试的提交，把已验证的功能合在一个试用版本里。记录提交号、Actions 链接、测试结果和 IPA 下载入口。模拟器 App 不能装到 iPhone；未签名 IPA 需要签名后才能安装。没有真机时明确标注，不因此阻塞只需模拟器就能验证的功能。
 
-**现有自动化与这套约定的区别：** 以目标分支的 [native.yml](../.github/workflows/native.yml) 为准。目前的工作流仍把模拟器检查和设备打包串在一起。只要一次 PR 构建已经会出包，就复用它；不要再手动启动一轮。要做到“普通 PR 只跑检查，手动试用才打包”，应单独修改工作流。仅写入本文不会改变 GitHub 的触发条件。
+**如何出包：** 以目标分支的 [native.yml](../.github/workflows/native.yml) 为准。使用分离流程（见 [PR #1](https://github.com/Huanghgj/vcpchat-ios/pull/1)）时，代码 PR 的 native 任务只跑模拟器；需要试用时，在 GitHub Actions 的 Native iOS Build 页面点击 **Run workflow**，选择对应分支或标签，核对提交号。手动任务只跑 **Package iPhone release**。下载成功运行里的 **VChat-iOS-unsigned**，解压获得未签名 IPA。旧分支若仍在同一次 PR 检查中构建 IPA，直接复用该次产物。
 
 查看本 fork 的 [Actions](https://github.com/Huanghgj/vcpchat-ios/actions) 或 [PR](https://github.com/Huanghgj/vcpchat-ios/pulls)。排队、缺机器和检查失败都不是通过；拿到新提交的实际结果后再更新结论。
