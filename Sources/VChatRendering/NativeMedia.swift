@@ -5,10 +5,17 @@ import UniformTypeIdentifiers
 import VChatCore
 public struct MessageMedia: Sendable,Equatable,Identifiable {
     public var source: String; public var caption: String; public var kind: String
+    var preferredWidth: Double?; var cornerRadius: Double?
     public var id: String { kind + "\0" + source }
     public init?(source: String,caption: String = "",videoOnly: Bool = false) {
-        guard Self.isSafe(source) else { return nil }; let video = Self.isVideo(source)
+        guard Self.isSafe(source) || Self.relativeSticker(source) else { return nil }; let video = Self.isVideo(source)
         if videoOnly && !video { return nil }; self.source = source; self.caption = caption; kind = video ? "video" : "image"
+    }
+    static func relativeSticker(_ source: String) -> Bool {
+        guard source.utf8.count <= 2048, !source.hasPrefix("//"), let u = URL(string: source),
+              u.scheme == nil, u.host == nil, u.query == nil, u.fragment == nil, EmoticonCatalog.pair(u) != nil else { return false }
+        let parts = u.pathComponents.filter { $0 != "/" }
+        return parts.count == 2 || (parts.count == 3 && parts[0] == "images")
     }
     public static func isSafe(_ source: String) -> Bool {
         guard !source.unicodeScalars.contains(where: { $0.value < 32 }),source.utf8.count <= 30_000_000 else { return false }
@@ -27,7 +34,14 @@ public struct MessageMedia: Sendable,Equatable,Identifiable {
             guard let r = try? NSRegularExpression(pattern: "(?is)(?:^|\\s)" + key + #"\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#),let m = r.firstMatch(in: trimmed,range: NSRange(trimmed.startIndex...,in: trimmed)) else { return "" }
             for i in 1..<m.numberOfRanges where m.range(at: i).location != NSNotFound { return text.substring(with: m.range(at: i)).replacingOccurrences(of: "&amp;",with: "&") }; return ""
         }
-        let src = attribute("src"); guard var result = Self(source: src,caption: attribute("alt")) else { return nil }; if tag == "video" { result.kind = "video" }; return result
+        let src = attribute("src"); guard var result = Self(source: src,caption: attribute("alt")) else { return nil }; if tag == "video" { result.kind = "video" }
+        if let width=Double(attribute("width")), width.isFinite, width>0 { result.preferredWidth=min(1024,width) }
+        let style=attribute("style")
+        if let re=try? NSRegularExpression(pattern:#"(?i)(?:^|;)\s*border-radius\s*:\s*([0-9]{1,3})(?:px)?(?:;|$)"#),
+           let m=re.firstMatch(in:style,range:NSRange(style.startIndex...,in:style)) {
+            result.cornerRadius=min(128,Double((style as NSString).substring(with:m.range(at:1))) ?? 0)
+        }
+        return result
     }
 }
 public struct MediaRaster: Sendable {
@@ -37,23 +51,32 @@ public struct MediaRaster: Sendable {
 public struct VideoResource: Sendable { public var url: URL; var temporary: Bool }
 public actor NativeMediaLoader {
     public static let shared = NativeMediaLoader()
-    private let http = VCPHTTP(allowingRedirects: false)
+    private var expiration: [String:Date] = [:]
     private var cache: [String:MediaRaster] = [:],recent: [String] = []
+    private var imageGeneration = UUID()
     private var bytes = 0
     private var temporary: Set<URL> = []
     private let videoCacheDirectory: URL?
     public init(videoCacheDirectory: URL? = nil) { self.videoCacheDirectory = videoCacheDirectory }
     public func image(_ source: String) async throws -> MediaRaster {
         guard MessageMedia.isSafe(source) else { throw ClientError.server("图片地址无效") }
-        if let value = cache[source] { recent.removeAll { $0 == source }; recent.append(source); return value }
+        if let value = cache[source], expiration[source,default: .distantPast] > Date() { recent.removeAll { $0 == source }; recent.append(source); return value }
+        let generation = imageGeneration
         let data: Data
+        var expires = Date.distantFuture
         if source.lowercased().hasPrefix("data:") { data = try Self.embedded(source) }
-        else { let reply = try await http.response(URL(string: source)!,limit: 20_000_000); guard (200..<300).contains(reply.status) else { throw ClientError.http(reply.status) }; data = reply.data }
+        else { let reply = try await RemoteImageStore.shared.resource(URL(string: source)!); data = reply.data; expires = reply.expires }
         try Task.checkCancellation()
-        if let value = cache[source] { return value }
+        guard generation == imageGeneration else { throw CancellationError() }
+        if let value = cache[source], expiration[source,default: .distantPast] > Date() { return value }
+        if let old = cache.removeValue(forKey: source) { recent.removeAll { $0 == source }; expiration[source] = nil; bytes -= old.image.bytesPerRow * old.image.height + (old.animation?.count ?? 0) }
         let value = try localImage(data),image = value.image,cost = image.bytesPerRow*image.height + (value.animation?.count ?? 0)
-        while !recent.isEmpty && (recent.count >= 8 || bytes+cost > 32_000_000) { let old = recent.removeFirst(); if let v = cache.removeValue(forKey: old) { bytes -= v.image.bytesPerRow*v.image.height + (v.animation?.count ?? 0) } }
-        if cost <= 32_000_000 { cache[source] = value; recent.append(source); bytes += cost }; return value
+        while !recent.isEmpty && (recent.count >= 8 || bytes+cost > 32_000_000) { let old = recent.removeFirst(); expiration[old] = nil; if let v = cache.removeValue(forKey: old) { bytes -= v.image.bytesPerRow*v.image.height + (v.animation?.count ?? 0) } }
+        if cost <= 32_000_000 && expires > Date() { expiration[source] = expires; cache[source] = value; recent.append(source); bytes += cost }; return value
+    }
+    public func clearImageCache() async {
+        imageGeneration = UUID(); cache.removeAll(); expiration.removeAll(); recent.removeAll(); bytes = 0
+        await RemoteImageStore.shared.clear()
     }
     public func localImage(_ data: Data) throws -> MediaRaster {
         guard data.count <= 20_000_000 else { throw ClientError.server("图片预览上限 20 MB") }

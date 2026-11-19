@@ -41,11 +41,13 @@ struct NativeMessageMedia: View {
     @State private var bounds = CGRect.zero
     @State private var viewing = false
     @State private var video = VideoState()
+    @Environment(\.stickerContext) private var stickers
     @Environment(\.messageViewport) private var viewport
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var visible: Bool { appeared && phase != .background && (viewport?.intersects(bounds) ?? true) }
-    private struct Load: Equatable { var source: String; var visible: Bool }
+    private struct Load: Equatable { var source: String; var stickers: StickerContext; var visible: Bool }
+    private var imageWidth: CGFloat? { item.preferredWidth.map { CGFloat($0) } }
     var body: some View {
         VStack(alignment: .leading,spacing: 6) {
             if item.kind == "video" {
@@ -53,20 +55,26 @@ struct NativeMessageMedia: View {
                 else { Button { video.play(item.source) } label: { VStack(spacing: 8) { Image(systemName: "play.circle.fill").font(.system(size: 46)); Text(video.loading ? "正在读取视频…" : "播放视频") }.frame(maxWidth: .infinity).frame(height: 180).background(.secondary.opacity(0.08),in: RoundedRectangle(cornerRadius: 12)) }.buttonStyle(.plain).disabled(video.loading || !visible) }
                 if let error = video.error { Text(error).font(.caption).foregroundStyle(.secondary) }
             } else if let image {
-                Button { viewing = true } label: { MediaImage(raster: image,animating: animations && !reduceMotion && visible && phase == .active).aspectRatio(image.width/image.height,contentMode: .fit).frame(maxHeight: 340) }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
+                Button { viewing = true } label: { MediaImage(raster: image,animating: animations && !reduceMotion && visible && phase == .active).aspectRatio(image.width/image.height,contentMode: .fit).frame(maxWidth:imageWidth, maxHeight:340).clipShape(RoundedRectangle(cornerRadius:CGFloat(item.cornerRadius ?? 0))) }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
             } else if let issue { Label(issue,systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
-            else { Label(visible ? "正在读取图片…" : "图片已暂停",systemImage: "photo").font(.caption).foregroundStyle(.secondary).frame(height: 100) }
+            else { Label(visible ? "正在读取图片…" : "图片已暂停",systemImage: "photo").font(.caption).foregroundStyle(.secondary).frame(height: imageWidth.map { min($0, 180) } ?? 100) }
             if !item.caption.isEmpty { Text(item.caption).font(.caption).foregroundStyle(.secondary) }
             if issue != nil || video.error != nil,let url = URL(string: item.source),["https","http"].contains(url.scheme) { Link("打开原链接",destination: url).font(.caption) }
         }.frame(maxWidth: .infinity,alignment: .leading)
             .background(GeometryReader { g in Color.clear.preference(key: MediaBounds.self,value: g.frame(in: .global)) })
             .onPreferenceChange(MediaBounds.self) { value in Task { @MainActor in bounds = value } }
-            .onAppear { appeared = true }.onDisappear { appeared = false; video.close(); image = nil }
+            .onAppear { appeared = true }.onDisappear { appeared = false; video.close() }
+            .onChange(of: stickers) { _,_ in image=nil; issue=nil; viewing=false }
             .onChange(of: item.id) { _,_ in video.close(); image = nil; issue = nil; viewing = false }
-            .onChange(of: visible) { _,v in if !v { video.close(); image = nil; issue = nil } }
-            .task(id: Load(source: item.id,visible: visible)) {
+            .onChange(of: visible) { _,v in if !v { video.close() } }
+            .task(id: Load(source:item.id,stickers:stickers,visible:visible)) {
                 guard visible,item.kind == "image" else { return }
-                do { let value = try await NativeMediaLoader.shared.image(item.source); if !Task.isCancelled { image = value; issue = nil } }
+                let source: String
+                if item.source.lowercased().hasPrefix("data:") { source=item.source }
+                else if let url=await StickerResolver.shared.url(item.source,in:stickers) { source=url.absoluteString }
+                else { if !Task.isCancelled { issue="表情地址不完整，请设置服务器和 File Key" }; return }
+                guard !Task.isCancelled else { return }
+                do { let value = try await NativeMediaLoader.shared.image(source); if !Task.isCancelled { image = value; issue = nil } }
                 catch { if !Task.isCancelled { issue = error.localizedDescription } }
             }
             .sheet(isPresented: $viewing) { if let image { RasterViewer(image: image.image,title: item.caption.isEmpty ? "图片" : item.caption,animation: image.animation,animations: animations) } }

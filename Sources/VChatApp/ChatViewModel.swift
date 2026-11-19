@@ -61,6 +61,13 @@ struct TopicDraft: Codable, Sendable {
     var topicStates: [String:TopicToolState] = [:]
     var profile = UserProfile()
     var renderOptions = RenderOptions()
+    var stickerCatalog: EmoticonCatalog?
+    var stickerOrigin: URL?
+    var currentImageOrigin: URL? { StickerDirectories.origin(try? configuration.baseURL()) }
+    var stickers: StickerContext {
+        StickerContext(server: currentImageOrigin, fileKey: serviceSecrets[.fileKey] ?? "",
+                       catalog: stickerOrigin == currentImageOrigin ? stickerCatalog : nil)
+    }
     var appearance = AppearanceSettings()
     var inputPreferences = InputPreferences()
     #if os(iOS)

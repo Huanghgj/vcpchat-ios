@@ -54,6 +54,13 @@ struct WorkspaceView: View {
         .preferredColorScheme(model.appearance.theme == .paper ? .light : .dark)
         .environment(\.workspaceMotion,motion).environment(\.workspaceTheme,model.appearance.theme)
         .environment(\.messageEmphasisColor,model.appearance.theme.tint)
+        .environment(\.stickerContext,model.stickers)
+        .task(id: model.currentImageOrigin) {
+            guard let origin=model.currentImageOrigin else { return }
+            let saved=await StickerDirectories.shared.saved(origin)
+            guard !Task.isCancelled, model.currentImageOrigin==origin else { return }
+            model.stickerOrigin=origin; model.stickerCatalog=saved
+        }
         .tint(palette.accent).foregroundStyle(palette.ink)
         .sheet(item: $editing) { AgentEditor(model: model,agent: $0) }
         .sheet(item: $editingGroup) { GroupEditor(model: model,group: $0) }
