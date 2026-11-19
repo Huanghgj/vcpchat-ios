@@ -19,7 +19,8 @@ try {
     }
     if(route==='/status')return JSON.stringify({fields:{tag:{available:true},chunk:{available:true}},messages:{available:true}});
     if(/^\/field\/(tag|chunk)$/.test(route))return JSON.stringify(f);
-    if(route==='/field/chunk/node/1')return JSON.stringify({id:1,index:0,label:'春',diary:'日记',path:'test.md',inField:true,group:0,radius:.4,text:'示例正文',tags:[]});
+    if(route==='/field/chunk/node/1')return JSON.stringify({id:1,index:0,label:'春',diary:'日记',path:'test.md',inField:true,group:0,radius:.4,text:'示例正文',tags:[],navigation:[]});
+    if(window.rejectNextQuery && route.includes('/query?')) {window.rejectNextQuery=false; throw new Error('消息没有可用向量');}
     if(route.includes('/query?'))return JSON.stringify({query:{id:1,index:0,radius:.4,label:'春'},theta:[0,40,80],distance:[0,.55,.4],contours:[]});
     if(route.startsWith('/messages'))return JSON.stringify({rows:[{hash:'abcd1234',at:0,text:'一条测试消息'}]});
     throw new Error('unexpected '+route);
@@ -34,6 +35,14 @@ try {
   assert(dims.width<=w && dims.stage.height>150 && dims.side.height>100);
  }
  const clickText=async(label)=>{await p.evaluate(label=>[...document.querySelectorAll('button')].find(b=>b.textContent===label).click(),label);};
+ await clickText('查询');
+ await p.waitForSelector('.wa-list .wa-stack');
+ await p.evaluate(()=>{window.rejectNextQuery=true;});
+ await p.click('.wa-list .wa-stack');
+ await p.waitForFunction('document.querySelector(".wa-message").textContent === "消息没有可用向量"');
+ await p.evaluate(()=>atlas.flush());
+ assert.equal(await p.$eval('.wa-message',e=>e.hidden ? '' : e.textContent),'消息没有可用向量');
+ await clickText('全景');
  const scale=()=>p.evaluate('atlas.inspect().camera.scale');
  const base=await scale();
  await p.click('[aria-label="放大场图"]');assert(await scale()>base);
@@ -48,6 +57,7 @@ try {
  await clickText('Chunk 场');await p.waitForFunction('atlas.inspect().kind==="chunk" && document.querySelector(".wa-side").textContent.includes("节点")');
  await p.type('.wa-search input','春');await p.waitForSelector('.wa-search-list button');await p.click('.wa-search-list button');
  await p.waitForFunction('document.querySelector(".wa-side").textContent.includes("示例正文")');
+ await p.evaluate(()=>atlas.flush());
  await clickText('以此为查询');await p.waitForFunction('atlas.inspect().view==="query"');
  assert.deepEqual(await p.evaluate('atlas.inspect().query.top'),[3,2]);
  await clickText('黎曼切片');await p.waitForFunction('document.querySelector(".wa-plate-note").textContent.includes("黎曼") || document.querySelector(".wa-side [aria-pressed=true]").textContent.includes("黎曼")');

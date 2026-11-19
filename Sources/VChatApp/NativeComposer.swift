@@ -11,8 +11,7 @@ import AppKit
     fileprivate weak var editor: UITextView?
     #endif
 
-    func submit(_ accept: () -> Bool) {
-        guard accept() else { return }
+    func dismiss() {
         #if os(iOS)
         editor?.resignFirstResponder()
         #endif

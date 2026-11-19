@@ -7,6 +7,7 @@ import VChatCore
 public struct FieldAtlasView: View {
     private let configuration: ConnectionConfiguration
     private let key: String
+    @AppStorage("atlas.responseLimitMiB") private var responseLimit = FieldAtlasResponseLimit.standard
     @State private var revision = 0
 
     public init(configuration: ConnectionConfiguration, key: String) {
@@ -17,8 +18,8 @@ public struct FieldAtlasView: View {
     public var body: some View {
         Group {
             if let page = Bundle.module.url(forResource: "index", withExtension: "html", subdirectory: "FieldAtlas") {
-                AtlasPage(page: page, configuration: configuration, key: key)
-                    .id(revision)
+                AtlasPage(page: page, configuration: configuration, key: key, responseLimit: responseLimit)
+                    .id(responseLimit).id(revision)
             } else {
                 ContentUnavailableView("场图资源缺失", systemImage: "exclamationmark.triangle")
             }
@@ -27,6 +28,13 @@ public struct FieldAtlasView: View {
         .navigationTitle("双曲场图")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            Menu {
+                Picker("单次响应上限", selection: $responseLimit) {
+                    ForEach(FieldAtlasResponseLimit.allCases, id: \.self) { limit in
+                        Text(limit == .unlimited ? "不限" : "\(limit.rawValue) MiB").tag(limit)
+                    }
+                }
+            } label: { Label("场图响应上限", systemImage: "slider.horizontal.3") }
             Button { revision += 1 } label: { Label("重新加载场图", systemImage: "arrow.clockwise") }
         }
     }
@@ -36,9 +44,10 @@ private struct AtlasPage: UIViewRepresentable {
     let page: URL
     let configuration: ConnectionConfiguration
     let key: String
+    let responseLimit: FieldAtlasResponseLimit
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(page: page, client: FieldAtlasClient(configuration: configuration, key: key))
+        Coordinator(page: page, client: FieldAtlasClient(configuration: configuration, key: key, responseLimit: responseLimit))
     }
 
     func makeUIView(context: Context) -> WKWebView {

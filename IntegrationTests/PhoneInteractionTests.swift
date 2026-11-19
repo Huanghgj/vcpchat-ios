@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 import WebKit
 import XCTest
+import SQLite3
+@testable import VChatCore
 import VChatRendering
 @testable import VChat
 
@@ -81,6 +83,97 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertTrue(state.sent.isEmpty)
     }
 
+    @MainActor func testComposerKeepsFocusUntilMessageAndOutboxCommit() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let path = folder.appendingPathComponent("chat.sqlite").path
+        let store = try await ChatStore.open(path: path)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TRIGGER reject_outbox BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT,'outbox unavailable'); END", nil, nil, nil), SQLITE_OK)
+
+        let model = ChatViewModel()
+        let agent = VCPAgent(), topic = ChatTopic(ownerId: agent.id, title: "本机入队")
+        let room = ChatRoom(id: topic.id, messages: [])
+        model.store = store; model.agents = [agent]; model.topics = [topic]
+        model.activeTopicID = topic.id; model.rooms = [topic.id: room]; model.apiKey = "fixture"
+        let keyboard = ComposerKeyboard()
+        let composer = NativeComposer(text: Binding(get: { model.draft }, set: { model.draft = $0 }),
+                                     enterSends: true, insertNewline: 0, keyboard: keyboard) {
+            model.send {
+                keyboard.dismiss()
+                room.cancellation = .stopped  // Stop before network generation, after the real commit.
+            }
+        }
+        let window = try host(composer)
+        defer { window.isHidden = true }
+        try await eventually("composer mounted") { self.find(UITextView.self, in: window) != nil }
+        let editor = try XCTUnwrap(find(UITextView.self, in: window))
+        XCTAssertTrue(editor.becomeFirstResponder())
+        editor.insertText("重试"); editor.insertText("\n")
+        await room.generation?.value
+        let rolledBack = try await store.messages(topicID: topic.id)
+        XCTAssertTrue(room.error?.contains("outbox unavailable") == true)
+        XCTAssertTrue(rolledBack.isEmpty)
+        XCTAssertEqual(room.draft, "重试")
+        XCTAssertTrue(editor.isFirstResponder)
+
+        XCTAssertEqual(sqlite3_exec(db, "DROP TRIGGER reject_outbox", nil, nil, nil), SQLITE_OK)
+        editor.insertText("\n")
+        await room.generation?.value
+        let stored = try await store.messages(topicID: topic.id)
+        let pending = try await store.pending()
+        XCTAssertEqual(stored.map(\.content), ["重试"])
+        XCTAssertEqual(pending, 1)
+        XCTAssertEqual(room.draft, "")
+        XCTAssertFalse(editor.isFirstResponder)
+    }
+
+    func testAtlasKeepsConfiguredPrefixAndEncodedQuery() throws {
+        for base in ["https://example.invalid/vcp", "https://example.invalid/vcp/v1", "https://example.invalid/vcp/v1/chat/completions"] {
+            let config = ConnectionConfiguration(server: base)
+            let url = try FieldAtlasClient.endpoint("/messages?q=%E6%98%A5%26%23", configuration: config)
+            XCTAssertEqual(url.absoluteString, "https://example.invalid/vcp/api/plugins/WarpedFieldAtlas/messages?q=%E6%98%A5%26%23")
+            XCTAssertThrowsError(try FieldAtlasClient.endpoint("/unlisted", configuration: config))
+        }
+    }
+
+    func testAtlasResponseLimitCanBeRaisedOrRemoved() async throws {
+        let session = URLSessionConfiguration.ephemeral
+        session.protocolClasses = [AtlasResponseFixture.self]
+        for limit in [FieldAtlasResponseLimit.standard, .larger, .unlimited] {
+            let client = FieldAtlasClient(configuration: .init(server: "https://atlas.invalid/vcp"), key: "fixture", responseLimit: limit, sessionConfiguration: session)
+            defer { client.close() }
+            do {
+                let body = try await client.get("/status")
+                XCTAssertNotEqual(limit, .standard)
+                XCTAssertEqual(body, "{}")
+            } catch {
+                XCTAssertEqual(limit, .standard)
+                XCTAssertTrue(error.localizedDescription.contains("32 MiB"))
+            }
+        }
+    }
+
+    @MainActor func testBubbleHostIsTransparentInBothThemes() async throws {
+        let web = WKWebView()
+        let sample = #"<div id="vcp-root" style="background:#faf5ef;color:#336699;border-radius:16px">卡片</div><p>正文</p>"#
+        for dark in [false, true] {
+            let page = HTMLIslandPolicy.document(sample, motion: false, media: false, dark: dark)
+            web.loadHTMLString(page, baseURL: nil)
+            try await eventually("bubble page loaded") { !web.isLoading }
+            let result = try await web.evaluateJavaScript("""
+                (() => { const css = el => getComputedStyle(el), card = css(document.querySelector('#vcp-root'));
+                    return [css(document.documentElement).backgroundColor, css(document.body).backgroundColor,
+                            css(document.querySelector('p')).color, card.backgroundColor, card.color, card.borderRadius]; })()
+                """) as? [String]
+            XCTAssertEqual(result, ["rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)", dark ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)",
+                                    "rgb(250, 245, 239)", "rgb(51, 102, 153)", "16px"])
+        }
+    }
+
     @MainActor func testBundledAtlasCanCallNativeBridge() async throws {
         let window = try host(FieldAtlasView(configuration: .init(server: "https://example.invalid"), key: ""))
         defer { window.isHidden = true }
@@ -145,12 +238,10 @@ final class PhoneInteractionTests: XCTestCase {
     var sent: [String] = []
 
     func send() {
-        keyboard.submit {
-            guard acceptsSend, !draft.isEmpty else { return false }
-            sent.append(draft)
-            draft = ""
-            return true
-        }
+        guard acceptsSend, !draft.isEmpty else { return }
+        sent.append(draft)
+        draft = ""
+        keyboard.dismiss()
     }
 }
 
@@ -160,4 +251,18 @@ private struct KeyboardFixture: View {
     var body: some View {
         NativeComposer(text: $state.draft, enterSends: enterSends, insertNewline: 0, keyboard: state.keyboard, onSend: state.send)
     }
+}
+
+// An advertised length exercises the preflight limit without allocating a large fixture.
+private final class AtlasResponseFixture: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "atlas.invalid" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Length": String(33 * 1024 * 1024)])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }

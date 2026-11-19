@@ -1,15 +1,27 @@
 import Foundation
 
+public enum FieldAtlasResponseLimit: Int, CaseIterable, Sendable {
+    case standard = 32, larger = 64, large = 128, unlimited = 0
+
+    var bytes: Int { self == .unlimited ? .max : rawValue * 1024 * 1024 }
+}
+
 /// Only the packaged atlas page may ask for these read-only WarpedFieldAtlas routes.
 public final class FieldAtlasClient: Sendable {
     private let configuration: ConnectionConfiguration
     private let key: String
     private let session: URLSession
 
-    public init(configuration: ConnectionConfiguration, key: String) {
+    private let responseLimit: FieldAtlasResponseLimit
+
+    public convenience init(configuration: ConnectionConfiguration, key: String, responseLimit: FieldAtlasResponseLimit = .standard) {
+        self.init(configuration: configuration, key: key, responseLimit: responseLimit, sessionConfiguration: .ephemeral)
+    }
+
+    init(configuration: ConnectionConfiguration, key: String, responseLimit: FieldAtlasResponseLimit, sessionConfiguration config: URLSessionConfiguration) {
+        self.responseLimit = responseLimit
         self.configuration = configuration
         self.key = key
-        let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.urlCredentialStorage = nil
         config.urlCache = nil
@@ -21,9 +33,13 @@ public final class FieldAtlasClient: Sendable {
         // Search terms come from encodeURIComponent. Do not allow raw separators, extra
         // parameters, arbitrary paths, hosts or schemes in a request carrying the chat key.
         let pattern = #"\A/(?:status|messages(?:\?q=(?:[A-Za-z0-9_.!~*'()-]|%[A-Fa-f0-9]{2})*)?|field/(?:tag|chunk)(?:/node/[0-9]{1,15}|/query\?(?:node=[0-9]{1,15}|message=[A-Za-z0-9_-]{8,128}(?:&radius=0\.[0-9]{1,4})?))?)\z"#
-        guard route.utf8.count <= 612, route.range(of: pattern, options: .regularExpression) != nil,
-              let url = URL(string: "/api/plugins/WarpedFieldAtlas" + route, relativeTo: try configuration.baseURL())?.absoluteURL
+        guard route.utf8.count <= 612, route.range(of: pattern, options: .regularExpression) != nil
         else { throw ClientError.server("不支持的场图请求") }
+        let parts = route.split(separator: "?", maxSplits: 1)
+        let path = try configuration.endpoint("api/plugins/WarpedFieldAtlas" + String(parts[0]))
+        guard var components = URLComponents(url: path, resolvingAgainstBaseURL: false) else { throw ClientError.invalidConfiguration }
+        if parts.count == 2 { components.percentEncodedQuery = String(parts[1]) }
+        guard let url = components.url else { throw ClientError.invalidConfiguration }
         return url
     }
 
@@ -38,12 +54,13 @@ public final class FieldAtlasClient: Sendable {
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse else { throw ClientError.server("未收到有效的服务器响应。") }
         let success = (200..<300).contains(http.statusCode)
-        let limit = success ? 32 * 1024 * 1024 : 64 * 1024
-        guard http.expectedContentLength <= Int64(limit) else { throw ClientError.server("场图响应过大，请缩小知识库快照。") }
+        let limit = success ? responseLimit.bytes : 64 * 1024
+        let oversized = success ? "场图响应超过 \(responseLimit.rawValue) MiB，请在场图右上角调高响应上限。" : "服务器返回的错误响应过大。"
+        guard http.expectedContentLength <= Int64(limit) else { throw ClientError.server(oversized) }
         var data = Data()
-        if http.expectedContentLength > 0 { data.reserveCapacity(Int(http.expectedContentLength)) }
+        if http.expectedContentLength > 0 { data.reserveCapacity(Int(min(http.expectedContentLength, 32 * 1024 * 1024))) }
         for try await byte in bytes {
-            guard data.count < limit else { throw ClientError.server("场图响应过大，请缩小知识库快照。") }
+            guard data.count < limit else { throw ClientError.server(oversized) }
             data.append(byte)
         }
         if !success {
