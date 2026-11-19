@@ -6,6 +6,13 @@ import VChatCore
 public struct MessageMedia: Sendable,Equatable,Identifiable {
     public var source: String; public var caption: String; public var kind: String
     var preferredWidth: Double?; var cornerRadius: Double?
+    var inlineWidthLimit: CGFloat? {
+        if !source.lowercased().hasPrefix("data:"), let url=URL(string:source) {
+            if EmoticonCatalog.pair(url) != nil { return CGFloat(preferredWidth ?? 110) }
+            if ["http","https"].contains(url.scheme?.lowercased() ?? "") { return nil }
+        }
+        return preferredWidth.map { CGFloat($0) }
+    }
     public var id: String { kind + "\0" + source }
     public init?(source: String,caption: String = "",videoOnly: Bool = false) {
         guard Self.isSafe(source) || Self.relativeSticker(source) else { return nil }; let video = Self.isVideo(source)

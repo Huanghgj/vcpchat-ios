@@ -33,6 +33,25 @@ import VChatCore
         if let value = resource { resource = nil; Task { await NativeMediaLoader.shared.release(value) } }
     }
 }
+/// An inline remote photo uses the width proposed by its chat bubble, not a
+/// thumbnail width copied from a model's HTML. Stickers keep their intended size.
+struct MessageImageLayout: Layout {
+    static let maximumHeight: CGFloat = 720
+    let pixels: CGSize
+    let widthLimit: CGFloat?
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let proposed = proposal.width.flatMap { $0.isFinite ? max(0,$0) : nil }
+        let width = min(proposed ?? min(pixels.width,widthLimit ?? 320), widthLimit ?? .greatestFiniteMagnitude)
+        guard pixels.width > 0, pixels.height > 0 else { return .zero }
+        let scale = min(width / pixels.width, Self.maximumHeight / pixels.height)
+        return CGSize(width:pixels.width * scale, height:pixels.height * scale)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at:bounds.origin,anchor:.topLeading,proposal:ProposedViewSize(bounds.size))
+    }
+}
+
 struct NativeMessageMedia: View {
     let item: MessageMedia; var animations: Bool
     @State private var image: MediaRaster?
@@ -47,7 +66,7 @@ struct NativeMessageMedia: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var visible: Bool { appeared && phase != .background && (viewport?.intersects(bounds) ?? true) }
     private struct Load: Equatable { var source: String; var stickers: StickerContext; var visible: Bool }
-    private var imageWidth: CGFloat? { item.preferredWidth.map { CGFloat($0) } }
+    private var imageWidth: CGFloat? { item.inlineWidthLimit }
     var body: some View {
         VStack(alignment: .leading,spacing: 6) {
             if item.kind == "video" {
@@ -55,7 +74,13 @@ struct NativeMessageMedia: View {
                 else { Button { video.play(item.source) } label: { VStack(spacing: 8) { Image(systemName: "play.circle.fill").font(.system(size: 46)); Text(video.loading ? "正在读取视频…" : "播放视频") }.frame(maxWidth: .infinity).frame(height: 180).background(.secondary.opacity(0.08),in: RoundedRectangle(cornerRadius: 12)) }.buttonStyle(.plain).disabled(video.loading || !visible) }
                 if let error = video.error { Text(error).font(.caption).foregroundStyle(.secondary) }
             } else if let image {
-                Button { viewing = true } label: { MediaImage(raster: image,animating: animations && !reduceMotion && visible && phase == .active).aspectRatio(image.width/image.height,contentMode: .fit).frame(maxWidth:imageWidth, maxHeight:340).clipShape(RoundedRectangle(cornerRadius:CGFloat(item.cornerRadius ?? 0))) }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
+                MessageImageLayout(pixels:CGSize(width:image.width,height:image.height),widthLimit:imageWidth) {
+                    Button { viewing = true } label: {
+                        MediaImage(raster:image,animating:animations && !reduceMotion && visible && phase == .active)
+                            .frame(maxWidth:.infinity,maxHeight:.infinity)
+                            .clipShape(RoundedRectangle(cornerRadius:CGFloat(item.cornerRadius ?? 0)))
+                    }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
+                }
             } else if let issue { Label(issue,systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
             else { Label(visible ? "正在读取图片…" : "图片已暂停",systemImage: "photo").font(.caption).foregroundStyle(.secondary).frame(height: imageWidth.map { min($0, 180) } ?? 100) }
             if !item.caption.isEmpty && item.preferredWidth == nil { Text(item.caption).font(.caption).foregroundStyle(.secondary) }
