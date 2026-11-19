@@ -175,6 +175,23 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(changed, original, "A display card must not turn into prompt HTML")
     }
 
+    func testUnrelatedDisplayReplacementDoesNotPromoteExistingInlineHTML() async throws {
+        let original = "原始<span>原样</span>相邻，卡片标记"
+        let renderer = MessageRenderer()
+        var rule = RegexRule(); rule.findPattern = "卡片标记"
+        for template in ["改过的正文", "<details><summary>标题</summary>新卡片</details>"] {
+            rule.replaceWith = template
+            let blocks = try await renderer.render(original, options: .init(), dark: false, rules: [rule])
+            let html = blocks.compactMap { block -> String? in if case .html(let s) = block { return s }; return nil }
+            XCTAssertEqual(html, template.hasPrefix("<") ? [template] : [], "Only newly introduced inline HTML should be promoted")
+            let text = blocks.flatMap { block -> [String] in
+                guard case .paragraph(let runs) = block else { return [] }
+                return runs.compactMap { if case .text(let t) = $0 { return String(t.characters) }; return nil }
+            }.joined()
+            for piece in ["原始", "原样", "相邻"] { XCTAssertTrue(text.contains(piece), "Original surrounding text was lost: " + piece) }
+        }
+    }
+
     @MainActor func testRegexDetailsOutputCanActuallyOpenInItsWebView() async throws {
         var rule = RegexRule(); rule.findPattern = #"/\[状态:(.*?)\]/g"#
         rule.replaceWith = #"<details id="fixture-regex-details" title="a > b"><summary>状态</summary><p>$1</p></details>"#

@@ -25,13 +25,21 @@ public actor MessageRenderer {
         let filtered = rules.isEmpty ? source : try await RegexEngine.shared.apply(source, rules: rules, scope: "frontend", role: role, depth: depth)
         guard options.enabled else { return [.literal(filtered)] }
         let regexOutput = filtered != source
+        // A replacement elsewhere in the reply must not promote previously inline
+        // markup to a full-width web view. Compare whole paired fragments, not names.
+        var unchangedFragments = Set<String>()
+        if regexOutput, source.contains("<") {
+            for part in HTMLIslandPolicy.extractSections(from:source,regexOutput:true) {
+                if case .island(let html) = part { unchangedFragments.insert(html) }
+            }
+        }
         let source = options.media ? LooseImageTags.normalize(filtered) : filtered
         self.streaming = streaming
         var output: [RenderBlock] = []
         for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.contains("<"), streaming: streaming) {
             switch segment {
             case .text(let prose):
-                for section in HTMLIslandPolicy.extractSections(from:prose, regexOutput:regexOutput, streaming:streaming) {
+                for section in HTMLIslandPolicy.extractSections(from:prose, regexOutput:regexOutput, streaming:streaming, unchangedFragments:unchangedFragments) {
                     switch section {
                     case .island(let html):
                         output.append(options.html ? .html(html) : .literal(html))

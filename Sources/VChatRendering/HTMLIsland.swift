@@ -8,7 +8,8 @@ public enum IslandSection: Sendable, Equatable {
 }
 public enum HTMLIslandPolicy {
     public static let root = "<div id=\"vcp-root\">"
-    public static func accepts(_ source: String) -> Bool {
+    public static func accepts(_ source: String) -> Bool { divAttributes(source)?.root == true }
+    private static func divAttributes(_ source: String) -> (root: Bool, styled: Bool)? {
         // Read just the first opening tag. Attribute order and CSS do not change
         // a root's identity; attribute text containing a fake id does not count.
         let prefix = String(source.prefix(8192))
@@ -18,14 +19,15 @@ public enum HTMLIslandPolicy {
         _ = scanner.scanCharacters(from: whitespace.union(CharacterSet(charactersIn: "\u{FEFF}")))
         let indentation = prefix[..<scanner.currentIndex].components(separatedBy: .newlines).last ?? ""
         guard !indentation.contains("\t"),indentation.filter({ $0 != "\u{FEFF}" }).count < 4,
-              scanner.scanString("<") != nil,scanner.scanString("div") != nil else { return false }
+              scanner.scanString("<") != nil,scanner.scanString("div") != nil else { return nil }
         let names = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:-.")
         let unquoted = whitespace.union(CharacterSet(charactersIn: "\"'`=<>")).inverted
         var rootID: String?
+        var styled = false
         while !scanner.isAtEnd {
             let separator = scanner.scanCharacters(from: whitespace)
-            if scanner.scanString(">") != nil { return rootID == "vcp-root" }
-            guard separator != nil,let name = scanner.scanCharacters(from: names) else { return false }
+            if scanner.scanString(">") != nil { return (rootID == "vcp-root", styled) }
+            guard separator != nil,let name = scanner.scanCharacters(from: names) else { return nil }
             let afterName = scanner.currentIndex
             _ = scanner.scanCharacters(from: whitespace)
             var value: String?
@@ -33,18 +35,19 @@ public enum HTMLIslandPolicy {
                 _ = scanner.scanCharacters(from: whitespace)
                 if let quote = scanner.scanString("\"") ?? scanner.scanString("'") {
                     value = scanner.scanUpToString(quote) ?? ""
-                    guard scanner.scanString(quote) != nil else { return false }
+                    guard scanner.scanString(quote) != nil else { return nil }
                 } else {
-                    guard let raw = scanner.scanCharacters(from: unquoted) else { return false }
+                    guard let raw = scanner.scanCharacters(from: unquoted) else { return nil }
                     value = raw
                 }
             } else { scanner.currentIndex = afterName }
+            if ["style","class"].contains(name.lowercased()), let value, !value.isEmpty { styled = true }
             if name.lowercased() == "id" {
-                guard rootID == nil,let value else { return false }
+                guard rootID == nil,let value else { return nil }
                 rootID = value
             }
         }
-        return false
+        return nil
     }
     public static func containsIsland(_ source: String) -> Bool {
         extractSections(from:source).contains { if case .island = $0 { return true }; return false }
@@ -54,14 +57,13 @@ public enum HTMLIslandPolicy {
     // inside quoted attributes, comments and raw-text elements cannot open a card.
     private static let tagTokens = try! NSRegularExpression(pattern: #"(?is)<!--.*?(?:-->|$)|<(script|style|pre|code|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>.*?(?:</\1\s*>|$)|(`+)(?!`).*?\2(?!`)|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'">])*>"#)
     private static let possibleRoot = try! NSRegularExpression(pattern: #"(?i)<(?:div|details|section|article|aside|figure|span|p|table|ul|ol|blockquote)(?=[\s>])"#)
-    private static let styledDiv = try! NSRegularExpression(pattern: #"(?i)^<div(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*?\s+(?:style|class)\s*="#)
     private static let blockRoots: Set<String> = ["div","details","section","article","aside","figure"]
     private static let regexRoots: Set<String> = ["div","details","section","article","aside","figure","span","p","table","ul","ol","blockquote"]
     private struct Container { let tag: String; let opening: NSRange; var end: Int? }
 
     /// Paired fragments become their own WebKit document; neighboring prose and
     /// standalone images still go through the native Markdown/media renderer.
-    public static func extractSections(from source: String, regexOutput: Bool = false, streaming: Bool = false) -> [IslandSection] {
+    public static func extractSections(from source: String, regexOutput: Bool = false, streaming: Bool = false, unchangedFragments: Set<String> = []) -> [IslandSection] {
         let s=source as NSString
         guard source.contains("<"), possibleRoot.firstMatch(in:source,range:NSRange(location:0,length:s.length)) != nil else { return [.markdown(source)] }
         let fences=codeFences(source), roots=regexOutput ? regexRoots : blockRoots
@@ -97,7 +99,8 @@ public enum HTMLIslandPolicy {
             let lineStart=line==0 || s.character(at:line-1)==10
             if lineStart && (at-line >= 4 || s.substring(with:NSRange(location:line,length:at-line)).contains("\t")) { continue }
             let opening=s.substring(with:card.opening)
-            let explicit=card.tag=="div" && accepts(opening)
+            let attributes = card.tag == "div" ? divAttributes(opening) : nil
+            let explicit = attributes?.root == true
             // Plain regex wrappers are accepted only when balanced. Legacy explicit
             // roots and streaming visual DIVs may still be presented progressively.
             let end=card.end ?? s.length
@@ -106,10 +109,10 @@ public enum HTMLIslandPolicy {
             let visual=card.tag=="div" && lineStart &&
                 body.range(of:#"(?i)<(?:canvas|script|style|img|svg)\b"#,options:.regularExpression) != nil
             let start=findStylePrefix(in:s,after:cursor,before:at)
-            let hasStyle = card.tag == "div" && opening.utf8.count <= 8192 && styledDiv.firstMatch(in:opening,range:NSRange(location:0,length:opening.utf16.count)) != nil
-            let semantic = card.tag != "div" || start < at || hasStyle
+            let semantic = (blockRoots.contains(card.tag) && card.tag != "div") || start < at || attributes?.styled == true
+            let promoted = regexOutput && !unchangedFragments.contains(body)
             guard explicit || (visual && (streaming || card.end != nil))
-                || (card.end != nil && (regexOutput || semantic)) else { continue }
+                || (card.end != nil && (promoted || semantic)) else { continue }
             let last=attachedScriptsEnd(in:s,from:end)
             if start>cursor { sections.append(.markdown(s.substring(with:NSRange(location:cursor,length:start-cursor)))) }
             sections.append(.island(s.substring(with:NSRange(location:start,length:last-start))))
@@ -121,6 +124,7 @@ public enum HTMLIslandPolicy {
     }
 
     static func codeFences(_ source: String) -> [NSRange] {
+        guard source.contains("```") || source.contains("~~~") else { return [] }
         var ranges: [NSRange] = []; var opened: (Int, String, Int)?; var offset = 0
         let s = source as NSString
         for raw in source.components(separatedBy: "\n") {
