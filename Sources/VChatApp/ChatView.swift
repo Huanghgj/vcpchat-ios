@@ -20,7 +20,7 @@ struct ChatView: View {
 
     private func sendDraft() {
         guard !model.loading else { return }
-        model.send(onDraftCleared: keyboard.dismiss)
+        model.send(onDraftCleared: keyboard.didClearDraft)
     }
     @State private var creatingTopic = false
     var body: some View {

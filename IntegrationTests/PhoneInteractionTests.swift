@@ -103,7 +103,7 @@ final class PhoneInteractionTests: XCTestCase {
         let composer = NativeComposer(text: Binding(get: { model.draft }, set: { model.draft = $0 }),
                                      enterSends: true, insertNewline: 0, keyboard: keyboard) {
             model.send {
-                keyboard.dismiss()
+                keyboard.didClearDraft()
                 room.cancellation = .stopped  // Stop before network generation, after the real commit.
             }
         }
@@ -128,6 +128,7 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(stored.map(\.content), ["重试"])
         XCTAssertEqual(pending, 1)
         XCTAssertEqual(room.draft, "")
+        XCTAssertEqual(editor.text, "")
         XCTAssertFalse(editor.isFirstResponder)
     }
 
@@ -241,7 +242,7 @@ final class PhoneInteractionTests: XCTestCase {
         guard acceptsSend, !draft.isEmpty else { return }
         sent.append(draft)
         draft = ""
-        keyboard.dismiss()
+        keyboard.didClearDraft()
     }
 }
 

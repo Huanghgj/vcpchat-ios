@@ -11,8 +11,11 @@ import AppKit
     fileprivate weak var editor: UITextView?
     #endif
 
-    func dismiss() {
+    func didClearDraft() {
         #if os(iOS)
+        // SwiftUI can coalesce the final keystroke and draft reset without repainting UIKit.
+        editor?.text = ""
+        editor?.invalidateIntrinsicContentSize()
         editor?.resignFirstResponder()
         #endif
     }
