@@ -357,6 +357,18 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertFalse(prose.contains("fixturePulse"))
         XCTAssertFalse(blocks.contains { if case .literal(let value)=$0 {return value.contains("fixturePulse")};return false },
                        "Applied stylesheet must never also appear as literal source")
+        let poststyled = "<div id='solo-id'>后置样式卡</div>\n\n中间段落仍然是正文。\n\n<style>#solo-id { border-radius:9px; }</style>"
+        let late = try await MessageRenderer().render(poststyled,options:.init(),dark:false)
+        let lateCard = try XCTUnwrap(late.compactMap { block -> String? in
+            if case .html(let body)=block { return body }; return nil
+        }.first)
+        XCTAssertTrue(lateCard.contains("后置样式卡") && lateCard.contains("#solo-id { border-radius:9px; }"))
+        XCTAssertFalse(lateCard.contains("中间段落"),"Only the matching stylesheet travels with the id-only card")
+        XCTAssertTrue(late.contains { block in
+            guard case .paragraph(let runs)=block else {return false}
+            return runs.contains { if case .text(let t)=$0 { return String(t.characters).contains("中间段落仍然是正文。") };return false }
+        })
+        XCTAssertFalse(late.contains { if case .literal(let t)=$0 { return t.contains("#solo-id") }; return false })
         let window=try host(HTMLIsland(source:styled,options:.init()).environment(\.scenePhase,.active))
         defer { window.isHidden=true }
         let web=try await readyFixtureWeb(window,scenario:"styled card")

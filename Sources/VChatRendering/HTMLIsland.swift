@@ -112,8 +112,9 @@ public enum HTMLIslandPolicy {
                     guard let index=stacks[tag]?.popLast() else { continue }
                     candidates[index].end=NSMaxRange(m.range);openCount -= 1
                 } else {
-                    stacks[tag,default:[]].append(candidates.count);openCount += 1
-                    candidates.append(Container(tag:tag,opening:m.range,end:nil))
+                    let selfClosingSVG = tag=="svg" && s.character(at:NSMaxRange(m.range)-2)==47
+                    if !selfClosingSVG { stacks[tag,default:[]].append(candidates.count);openCount += 1 }
+                    candidates.append(Container(tag:tag,opening:m.range,end:selfClosingSVG ? NSMaxRange(m.range) : nil))
                 }
             }
         }
@@ -147,7 +148,11 @@ public enum HTMLIslandPolicy {
                 if styleStartingAt[token.location] != nil { attached.append(token); start=token.location }
                 probe=skipWhitespace(token.location,backwards:true)
             }
-            let semantic = (blockRoots.contains(card.tag) && card.tag != "div") || start < at || attributes?.styled == true
+            let selectors=attributes?.selectors ?? []
+            let scoped=detached.filter {
+                (NSMaxRange($0.range)<=start || $0.range.location>=end) && !$0.selectors.isDisjoint(with:selectors)
+            }
+            let semantic = (blockRoots.contains(card.tag) && card.tag != "div") || start < at || attributes?.styled == true || !scoped.isEmpty
             let promoted = regexOutput && !unchangedFragments.contains(body)
             guard explicit || (streaming && card.tag=="svg") || (visual && (streaming || card.end != nil))
                 || (card.end != nil && (promoted || semantic)) else { continue }
@@ -165,19 +170,19 @@ public enum HTMLIslandPolicy {
             if trailing>last, skipWhitespace(trailing,backwards:false)==s.length { last=trailing }
             // A model may put explanatory prose between a stylesheet and the class
             // that uses it. Copy only sheets naming this root, never styles inside another card.
-            let selectors=attributes?.selectors ?? []
-            let scoped=detached.filter { NSMaxRange($0.range)<=start && !$0.selectors.isDisjoint(with:selectors) }
-            var prefix=""
+            var prefix="", suffix=""
             for sheet in scoped {
                 usedSheets.insert(sheet.range.location)
                 let css=s.substring(with:sheet.range)
-                if !inherited.contains(css) { prefix += css+"\n" }
+                if NSMaxRange(sheet.range)<=start {
+                    if !inherited.contains(css) { prefix += css+"\n" }
+                } else if sheet.range.location>=last { suffix += "\n"+css }
             }
-            sections.append(.island(prefix + inherited + s.substring(with:NSRange(location:start,length:last-start))))
+            sections.append(.island(prefix + inherited + s.substring(with:NSRange(location:start,length:last-start)) + suffix))
             cursor=last
         }
         if sections.isEmpty { return [.markdown(source)] }
-        if cursor<s.length { sections.append(.markdown(s.substring(from:cursor))) }
+        if cursor<s.length { proseRanges.append((sections.count,NSRange(location:cursor,length:s.length-cursor))); sections.append(.markdown(s.substring(from:cursor))) }
         for (index,range) in proseRanges {
             let removed=detached.filter { usedSheets.contains($0.range.location) && $0.range.location>=range.location && NSMaxRange($0.range)<=NSMaxRange(range) }
             if !removed.isEmpty {
