@@ -153,6 +153,8 @@ SwiftUI 原生客户端，为 iPhone 上的日常聊天与多 Agent 协作而设
 
 ## 从源码运行
 
+参与本 fork 的开发，请先读[中文开发流程](docs/DEVELOPMENT.zh-CN.md)：VPS 资源约束、云端测试、PR 审查和试用打包都按这份约定执行。
+
 使用 **Xcode 16 或更新版本** 打开 `VChat.xcodeproj`，选择 **VChat** 和 iPhone 模拟器运行。连接自己的 iPhone 时，在签名设置中选择开发团队。
 
 也可通过 [GitHub Actions · Native iOS Build](https://github.com/silk2onion/vcpchat-ios/actions/workflows/native.yml) 构建模拟器 App 与未签名 IPA。
