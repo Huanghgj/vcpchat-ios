@@ -7,7 +7,7 @@ import UIKit
 import AppKit
 #endif
 
-@MainActor @Observable private final class RenderState {
+@MainActor @Observable final class RenderState {
     var blocks: [RenderBlock] = []
     var hasRendered = false
     var streaming = false
@@ -42,7 +42,12 @@ import AppKit
             streaming:input.streaming,rules:input.rules,role:input.role,depth:input.depth)
     }
     struct Input: Equatable { var source: String; var options: RenderOptions; var dark: Bool; var streaming: Bool; var rules: [RegexRule]; var role: String; var depth: Int }
-    func update(_ input: Input) {
+    func update(_ input: Input, memory:TranscriptLayoutMemory?, id messageID:String) {
+        let key=messageID as NSString
+        if !input.streaming, !messageID.isEmpty, let saved=memory?.finishedReplies.object(forKey:key), saved.input==input {
+            cancel();blocks=saved.blocks;streaming=false;hasRendered=true
+            return
+        }
         pending = input
         guard worker == nil else { return }
         let id = UUID(); generation = id
@@ -53,6 +58,9 @@ import AppKit
                     let rendered = try await render(input)
                     if !Task.isCancelled && generation == id, pending == nil || input.streaming && pending?.streaming == true && pending?.source.hasPrefix(input.source) == true {
                         blocks = rendered; streaming = input.streaming; hasRendered = true
+                        if !input.streaming, !messageID.isEmpty, let memory, input.source.utf8.count < 200_000, FinishedReply.admits(rendered) {
+                            memory.finishedReplies.setObject(FinishedReply(input,rendered),forKey:key,cost:2*input.source.utf8.count)
+                        }
                     }
                     try await Task.sleep(for: .milliseconds(70))
                 } catch is CancellationError { break }
@@ -63,6 +71,23 @@ import AppKit
     }
     func cancel() { generation = UUID(); worker?.cancel(); worker = nil; pending = nil; prefixCache=nil; openFence=nil }
 }
+/// Only cache canonical parsed text; do not keep decoded media/diagrams alive with recycled rows.
+@MainActor final class FinishedReply {
+    let input:RenderState.Input
+    let blocks:[RenderBlock]
+    init(_ input:RenderState.Input,_ blocks:[RenderBlock]) { self.input=input;self.blocks=blocks }
+    static func admits(_ blocks:[RenderBlock]) -> Bool {
+        for block in blocks {
+            switch block {
+            case .diagram: return false
+            case .list(let items,_): if !items.allSatisfy(admits) { return false }
+            case .quote(let inner): if !admits(inner) { return false }
+            default: break
+            }
+        }
+        return true
+    }
+}
 public struct RichMessageBody: View {
     public var source: String
     public var options: RenderOptions
@@ -71,6 +96,10 @@ public struct RichMessageBody: View {
     public var role: String
     public var depth: Int
     public var expandsToFill: Bool
+    @Environment(\.messageLayoutMemory) private var memory
+    @Environment(\.renderedMessageID) private var messageID
+    private var parsedKey:String { expandsToFill ? messageID : "" }
+    private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:depth) }
     @State private var rendering = RenderState()
     @State private var visible = false
     @Environment(\.colorScheme) private var scheme
@@ -80,6 +109,10 @@ public struct RichMessageBody: View {
     public var body: some View {
         Group {
             if plain { Text(verbatim: source).modifier(MessageTextSelection()) }
+            else if !streaming, !rendering.hasRendered, !parsedKey.isEmpty,
+                    let saved=memory?.finishedReplies.object(forKey:parsedKey as NSString), saved.input==input {
+                NativeBlocks(blocks:saved.blocks, options:options, streaming:false).equatable()
+            }
             else if !rendering.hasRendered && rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
             else { NativeBlocks(blocks: rendering.blocks, options: options,streaming: rendering.streaming).equatable() }
         }
@@ -90,13 +123,13 @@ public struct RichMessageBody: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)
         .onChange(of: RenderState.Input(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth), initial: true) { _, input in
-            if visible && phase != .background && !plain { rendering.update(input) } else { rendering.cancel() }
+            if visible && phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } else { rendering.cancel() }
         }
-        .onAppear { visible = true; if phase != .background && !plain { rendering.update(.init(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth)) } }
+        .onAppear { visible = true; if phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } }
         .onDisappear { visible = false; rendering.cancel() }
         .onChange(of: phase) { _, next in
             if next == .background { rendering.cancel() }
-            else if visible && !plain { rendering.update(.init(source: source,options: options,dark: scheme == .dark,streaming: streaming,rules: rules,role: role,depth: depth)) }
+            else if visible && !plain { rendering.update(input,memory:memory,id:parsedKey) }
         }
         .environment(\.openURL, OpenURLAction { url in ["http", "https", "mailto"].contains(url.scheme) ? .systemAction : .discarded })
     }

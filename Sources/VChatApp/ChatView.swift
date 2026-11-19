@@ -158,7 +158,7 @@ private struct ChatTimeline: View {
                         .background {
                             TranscriptScrollObserver { event in
                                 switch event {
-                                case .layoutChanged: if following.canScrollToLatest { layoutVersion += 1 }
+                                case .layoutChanged: if model.busy && following.canScrollToLatest { layoutVersion += 1 }
                                 case .began: following.beginInteraction()
                                 case .ended(let atLatest): following.endInteraction(atLatest: atLatest)
                                 }
@@ -177,7 +177,7 @@ private struct ChatTimeline: View {
                                 .background {
                                     TranscriptScrollObserver { event in
                                         switch event {
-                                        case .layoutChanged: if following.canScrollToLatest { layoutVersion += 1 }
+                                        case .layoutChanged: if model.busy && following.canScrollToLatest { layoutVersion += 1 }
                                         case .began: following.beginInteraction()
                                         case .ended(let atLatest): following.endInteraction(atLatest: atLatest)
                                         }
@@ -254,13 +254,16 @@ private struct NativeMessageRow: View {
                         if !message.reasoning.isEmpty { DisclosureGroup("思考过程") { Text(verbatim:message.reasoning).font(.callout).foregroundStyle(palette.muted).lineLimit(nil).fixedSize(horizontal:false,vertical:true).textSelection(.disabled) } }
                         RichMessageBody(message.text.isEmpty && message.status == "connecting" ? "正在连接…" : message.text,options: model.renderOptions,streaming: streaming,rules: model.displayRules(for: message),role: message.role,depth: model.rooms[message.topicID]?.depths[message.id] ?? 0,expandsToFill: message.role != "user").font(.system(size: 16)).lineSpacing(5)
                     }.environment(\.messageTextSelectionEnabled,false)
+                    .environment(\.topicMediaOwner,model.rooms[message.topicID]?.mediaScope)
+                    .environment(\.messageLayoutMemory,model.rooms[message.topicID]?.layoutMemory)
+                    .environment(\.renderedMessageID,message.id)
                     .padding(.horizontal,message.role == "user" ? 16 : 17).padding(.vertical,message.role == "user" ? 10 : 15)
                     .background(message.role == "user" ? palette.glass : palette.soft,in: UnevenRoundedRectangle(topLeadingRadius: message.role == "user" ? 20 : 5,bottomLeadingRadius: 20,bottomTrailingRadius: message.role == "user" ? 6 : 20,topTrailingRadius: 20))
                     .overlay(UnevenRoundedRectangle(topLeadingRadius: message.role == "user" ? 20 : 5,bottomLeadingRadius: 20,bottomTrailingRadius: message.role == "user" ? 6 : 20,topTrailingRadius: 20).stroke(glowing ? palette.accent.opacity(0.45) : palette.line,lineWidth: 0.7))
                 }
             }
         }.frame(maxWidth: .infinity,alignment: message.role == "user" ? .trailing : .leading)
-        .opacity(motion && !entered ? 0 : 1).offset(y: motion && !entered ? 10 : 0).scaleEffect(motion && !entered ? 0.985 : 1)
+        .opacity(motion && streaming && !entered ? 0 : 1).offset(y: motion && streaming && !entered ? 10 : 0).scaleEffect(motion && streaming && !entered ? 0.985 : 1)
         .onAppear { withAnimation(motion ? .timingCurve(0.2,0.8,0.2,1,duration: 0.32) : nil) { entered = true }; updateGlow() }
         .onChange(of: streaming) { _,_ in updateGlow() }.onChange(of: motion) { _,_ in updateGlow() }.onDisappear { glowing = false }
     }
