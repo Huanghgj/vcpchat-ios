@@ -597,7 +597,6 @@ function mountAtlas(container, source, options = {}) {
         stepMotion(f);
         if (state.view === 'query') {
             if (query()) drawQuery(ctx, f, query());
-            else showMessage(state.available[state.kind]?.available === false ? state.available[state.kind].reason : (state.messages ? '在全景图里点选一个节点再按“以此为查询”，或者在右边选一条对话消息。' : '先在全景图里点选一个节点，再按“以此为查询”。'));
         } else {
             drawPanorama(ctx, f);
         }
