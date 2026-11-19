@@ -58,6 +58,14 @@ struct TopicDraft: Codable, Sendable {
     var agents: [VCPAgent] = []
     var groups: [VCPGroup] = []
     var topics: [ChatTopic] = []
+    var lastMessageTimes: [String: Double] = [:]
+    var topicOrdering: TopicOrdering = {
+        guard let data = UserDefaults.standard.data(forKey: "native.topic-order"),
+              let saved = try? JSONDecoder().decode(TopicOrdering.self, from: data) else { return TopicOrdering() }
+        return saved
+    }() {
+        didSet { if let data = try? JSONEncoder().encode(topicOrdering) { UserDefaults.standard.set(data, forKey: "native.topic-order") } }
+    }
     var topicStates: [String:TopicToolState] = [:]
     var profile = UserProfile()
     var renderOptions = RenderOptions()
@@ -172,14 +180,14 @@ struct TopicDraft: Codable, Sendable {
                 let assistant = VCPAgent(id: "assistant", name: "助手")
                 try await database.put(assistant, kind: "agent", id: assistant.id); agents = [assistant]
             }
-            topics = try await database.records(ChatTopic.self, kind: "topic")
+            try await reloadTopicList(from: database)
             topicStates = try await database.topicToolStates()
             if topics.isEmpty {
                 let topic = ChatTopic(id: "legacy", ownerId: agents[0].id, title: "第一段对话")
                 try await database.put(topic, kind: "topic", id: topic.id); topics = [topic]
             }
             let previous = UserDefaults.standard.string(forKey: "native.active-topic") ?? "legacy"
-            await openTopic(topics.first { $0.id == previous } ?? topics[0])
+            await openTopic(topics.first { $0.id == previous } ?? recentTopics(topics)[0])
             await activity.load(store: database)
             await loadCatalog()
             loading = false
@@ -261,8 +269,23 @@ struct TopicDraft: Codable, Sendable {
             if profile.mainAgentID == id, let first = agents.first { await setMainAgent(first.id) }
         } catch { self.error = error.localizedDescription }
     }
+    func reloadTopicList(from store: ChatStore) async throws {
+        let list = try await store.topicList()
+        topics = list.topics
+        lastMessageTimes = list.lastMessages
+    }
+
+    func recentTopics(_ candidates: [ChatTopic]) -> [ChatTopic] {
+        TopicSortMode.activity.sorted(candidates, lastMessages: lastMessageTimes)
+    }
+
+    private func noteSavedUtterance(_ message: StoredMessage) {
+        guard ["user", "assistant"].contains(message.originalRole ?? message.role) else { return }
+        lastMessageTimes[message.topicID] = max(lastMessageTimes[message.topicID] ?? message.createdAt, message.createdAt)
+    }
+
     func openAgent(_ agent: VCPAgent) async {
-        if let topic = topics.filter({ $0.ownerType == "agent" && $0.ownerId == agent.id }).max(by: { $0.updatedAt < $1.updatedAt }) { await openTopic(topic) }
+        if let topic = recentTopics(topics.filter { $0.ownerType == "agent" && $0.ownerId == agent.id }).first { await openTopic(topic) }
         else { await createTopic(ownerID: agent.id) }
     }
     func saveGroup(_ group: VCPGroup) async -> Bool {
@@ -277,7 +300,7 @@ struct TopicDraft: Codable, Sendable {
         } catch { self.error = error.localizedDescription; return false }
     }
     func openGroup(_ group: VCPGroup) async {
-        if let topic = topics.filter({ $0.ownerType == "group" && $0.ownerId == group.id }).max(by: { $0.updatedAt < $1.updatedAt }) { await openTopic(topic) }
+        if let topic = recentTopics(topics.filter { $0.ownerType == "group" && $0.ownerId == group.id }).first { await openTopic(topic) }
         else { await createTopic(ownerID: group.id, ownerType: "group") }
     }
     func removeGroup(_ id: String) async {
@@ -321,9 +344,9 @@ struct TopicDraft: Codable, Sendable {
         do {
             rooms[topic.id]?.cancellation = .stopped
             await rooms[topic.id]?.session.stop(); await rooms[topic.id]?.generation?.value; rooms[topic.id]?.draftSave?.cancel()
-            try await store?.removeTopic(topic.id); rooms.removeValue(forKey: topic.id); topics.removeAll { $0.id == topic.id }
+            try await store?.removeTopic(topic.id); rooms.removeValue(forKey: topic.id); topics.removeAll { $0.id == topic.id }; lastMessageTimes[topic.id] = nil
             if activeTopicID == topic.id {
-                if let next = topics.first { await openTopic(next) }
+                if let next = recentTopics(topics).first { await openTopic(next) }
                 else if let agent = mainAgent { await createTopic(ownerID: agent.id) }
             }
         } catch { self.error = error.localizedDescription }
@@ -407,6 +430,7 @@ struct TopicDraft: Codable, Sendable {
             do {
                 if speakers.isEmpty { var local = user; local.status = "complete"; try await store.save(local); room.messages.append(MessageViewModel(local)) }
                 else { try await store.enqueue(user); room.messages.append(MessageViewModel(user)) }
+                noteSavedUtterance(user)
                 if room.draft == content && room.attachments == user.attachments {
                     room.draftSave?.cancel()
                     room.draft = ""; room.attachments = []
@@ -426,6 +450,7 @@ struct TopicDraft: Codable, Sendable {
                     guard !room.cancelled else { break }
                     let assistant = MessageViewModel(StoredMessage(topicID: room.id, agentID: agent.id, authorName: agent.name, role: "assistant", content: "", status: "connecting"))
                     currentReply = assistant; room.messages.append(assistant); try await store.save(assistant.record)
+                    noteSavedUtterance(assistant.record)
                     try await receive(request, into: assistant, room: room, store: store, acceptedUser: accepted ? nil : user.id)
                     if room.messages.first(where: { $0.id == user.id })?.status == "complete" { accepted = true }
                     if assistant.status != "complete" { break }
@@ -504,7 +529,9 @@ struct TopicDraft: Codable, Sendable {
     func trashMessage(_ message: MessageViewModel) async {
         guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return }
         guard let room = rooms[message.topicID], !room.busy, let store else { return }
-        do { try await store.trashMessage(message.id); room.messages.removeAll { $0.id == message.id }; room.pendingCount = room.messages.filter { $0.status == "pending" }.count }
+        do { try await store.trashMessage(message.id); room.messages.removeAll { $0.id == message.id }
+            lastMessageTimes[room.id] = room.messages.lazy.filter { ["user", "assistant"].contains($0.originalRole ?? $0.role) }.map(\.createdAt).max()
+            room.pendingCount = room.messages.filter { $0.status == "pending" }.count }
         catch { room.error = error.localizedDescription }
     }
     func restoreMessage(_ backup: MessageBackup) async -> Bool {
@@ -512,6 +539,7 @@ struct TopicDraft: Codable, Sendable {
         guard let store, rooms[backup.message.topicID]?.busy != true else { return false }
         do {
             try await store.restoreMessage(backup)
+            noteSavedUtterance(backup.message)
             if let room = rooms[backup.message.topicID] { room.messages.append(MessageViewModel(backup.message)); room.messages.sort { $0.createdAt < $1.createdAt }; room.pendingCount = room.messages.filter { $0.status == "pending" }.count }
             return true
         } catch { self.error = error.localizedDescription; return false }

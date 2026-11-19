@@ -35,6 +35,81 @@ final class PhoneInteractionTests: XCTestCase {
         XCTFail("Timed out: " + description, file: file, line: line)
     }
 
+    func testBellFixedSlotsAndManualOrderSurviveReload() throws {
+        func topic(_ id: String, _ created: Double) -> ChatTopic {
+            var t = ChatTopic(id: id, ownerId: "a")
+            t.createdAt = created
+            return t
+        }
+        let a = topic("a", 1), b = topic("b", 2), c = topic("c", 3), d = topic("d", 4)
+        let rows = [a, b, c, d], times = ["a": 10.0, "b": 9.0]
+        let scope = "agent:a"
+        var order = TopicOrdering()
+        func ids() -> [String] { order.sorted(rows, in: scope, lastMessages: times).map(\.id) }
+        XCTAssertEqual(ids(), ["a", "b", "d", "c"])
+        order.togglePin("b", at: 1, in: scope)
+        order.ring(in: scope)
+        XCTAssertEqual(ids(), ["d", "b", "c", "a"])
+        XCTAssertEqual(order.sorted(rows, in: "group:a", lastMessages: times).map(\.id), ["d", "c", "b", "a"])
+        // Drag a free row across the pin. The pin stays in slot 1.
+        order.saveMove([a, d, b, c], replacing: [d, b, c, a], in: scope)
+        order = try JSONDecoder().decode(TopicOrdering.self, from: JSONEncoder().encode(order))
+        XCTAssertTrue(order.isManual(scope))
+        XCTAssertFalse(order.isManual("group:a"))
+        XCTAssertEqual(ids(), ["a", "b", "d", "c"])
+        XCTAssertEqual(order.sorted([c, b], in: scope, lastMessages: [:]).map(\.id), ["c", "b"])
+        order.ring(in: scope)
+        XCTAssertFalse(order.isManual(scope))
+        XCTAssertEqual(ids(), ["d", "b", "c", "a"])
+        order.togglePin("b", at: 1, in: scope)
+        XCTAssertEqual(ids(), ["d", "c", "b", "a"])
+    }
+
+    @MainActor func testSyncAndReopenUseCreationAndLastUtteranceNotMetadata() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = try await ChatStore.open(path: folder.appendingPathComponent("chat.sqlite").path)
+        let previous = SyncProfile(id: "test", endpoint: "fixture")
+        var profile = previous
+        let owner = SyncIdentity(entityType: "owner", ownerType: "agent", ownerId: "alice")
+        profile.entities[owner.key] = SyncEntity(identity: owner, data: .object(["name": .string("Alice")]), updatedAt: 0)
+        func add(_ name: String, created: JSONValue, revision: Double, messages: [(String, Double)]) {
+            let id = SyncIdentity(entityType: "topic", ownerType: "agent", ownerId: "alice", topicId: name)
+            profile.entities[id.key] = SyncEntity(identity: id, data: .object(["name": .string(name), "createdAt": created]), updatedAt: revision)
+            profile.messages[id.topicKey] = messages.enumerated().map { i, item in
+                .object(["id": .string(String(i)), "role": .string(item.0), "content": .string("test"), "timestamp": .number(item.1)])
+            }
+        }
+        add("old", created: .number(10_000), revision: 999_000, messages: [("assistant", 30_000), ("system", 990_000)])
+        add("active", created: .number(20_000), revision: 21_000, messages: [("user", 65_000), ("assistant", 70_000)])
+        add("empty", created: .string("60000"), revision: 888_000, messages: [])
+        add("branch", created: .number(50_000), revision: 50_000, messages: [("user", 1_000)])
+        add("legacy", created: .null, revision: 777_000, messages: [])
+        let snapshot = profile.toLocal()
+        try await store.commitSync(profile: profile, previous: previous, before: SyncSnapshot(), after: snapshot)
+        let model = ChatViewModel()
+        model.store = store
+        await model.reloadSyncSource(profile)
+        func titles() -> [String] { model.recentTopics(model.topics).map(\.title) }
+        let expected = ["active", "empty", "branch", "old", "legacy"]
+        XCTAssertEqual(titles(), expected)
+        let old = try XCTUnwrap(model.topics.first { $0.title == "old" })
+        XCTAssertEqual(model.lastMessageTimes[old.id], 30)
+        await model.renameTopic(old, title: "renamed")
+        try await model.reloadTopicList(from: store)
+        XCTAssertEqual(titles(), ["active", "empty", "branch", "renamed", "legacy"])
+        let fresh = StoredMessage(topicID: old.id, role: "assistant", content: "new", createdAt: 80)
+        try await store.save(fresh)
+        await model.reloadTopicTools(changedID: old.id)
+        XCTAssertEqual(titles().first, "renamed")
+        await model.openTopic(old)
+        let live = try XCTUnwrap(model.room?.messages.first { $0.id == fresh.id })
+        await model.trashMessage(live)
+        XCTAssertEqual(titles().first, "active")
+        XCTAssertEqual(model.lastMessageTimes[old.id], 30)
+    }
+
     @MainActor func testComposerManualDismissalAndSendDismissal() async throws {
         let state = KeyboardFixtureState()
         state.draft = ""
