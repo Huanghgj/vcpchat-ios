@@ -3,6 +3,7 @@
     const mount = document.createElement('div');
     mount.dataset.vcpIslandHost = '';
     document.body.appendChild(mount);
+    if (window.VCPTopicMedia) vcpTopicResources.watch(mount);
     let previousChildren = [];
     function sealedRoot(source) {
         // Desktop V5 starts animations only after the outer div is sealed. A
@@ -69,6 +70,7 @@
                     img.setAttribute('src', 'vchat-image://asset?' + encodeURIComponent(src));
             }
         }
+        if (window.VCPTopicMedia) vcpTopicResources.walk(next);
         // Keep live state (e.g. a canvas or a counter mutated by an early
         // script) on unchanged top-level authored nodes across append and terminal.
         const children = Array.from(next.children, n => n.outerHTML);
@@ -88,6 +90,9 @@
                 return true;
             }
         });
+        if (document.documentElement.dataset.vcpMotion === 'off') {
+            for (const svg of mount.querySelectorAll('svg')) svg.pauseAnimations?.();
+        }
         VCPBubbleMarkdown.colorize(mount);
         // A partial <script> is parsed inertly. Activate only fully received
         // inline scripts, once; further text chunks keep the same live nodes.
@@ -102,7 +107,7 @@
         const sealed = !streaming || sealedRoot(source);
         const desktopCard = !mount.querySelector('#vcp-root');
         for (const script of mount.querySelectorAll('script')) {
-            if (!sealed) continue;
+            if (!sealed || script.namespaceURI !== "http://www.w3.org/1999/xhtml") continue;
             const key = JSON.stringify([script.type,script.textContent]);
             if (script.src || !closed.has(script.textContent) || executed.get(script) === key) continue;
             const active = document.createElement('script');
@@ -115,6 +120,7 @@
                 : script.textContent;
             executed.set(active,key); script.replaceWith(active);
         }
+        document.dispatchEvent(new Event('vcp-bubble-painted'));
         previousChildren = Array.from(mount.children,(node,i) => ({node, html:children[i]}));
         if (!streaming && !lifecycleDelivered) { pageLifecycle(true); lifecycleDelivered = true; }
     }
