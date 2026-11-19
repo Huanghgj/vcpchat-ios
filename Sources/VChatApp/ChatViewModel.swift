@@ -392,7 +392,7 @@ struct TopicDraft: Codable, Sendable {
     func detach(_ id: String) async {
         room?.attachments.removeAll { $0.id == id }; await flushDraft()
     }
-    func send() {
+    func send(onDraftCleared: @escaping @MainActor () -> Void = {}) {
         guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return }
         guard let room, let topic = activeTopic, !room.busy, (!room.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !room.attachments.isEmpty), let store else { return }
         let content = room.draft
@@ -405,10 +405,14 @@ struct TopicDraft: Codable, Sendable {
         room.generation = Task {
             var currentReply: MessageViewModel?
             do {
-                room.draftSave?.cancel()
                 if speakers.isEmpty { var local = user; local.status = "complete"; try await store.save(local); room.messages.append(MessageViewModel(local)) }
                 else { try await store.enqueue(user); room.messages.append(MessageViewModel(user)) }
-                room.draft = ""; room.attachments = []; try await store.put(TopicDraft(id: room.id, text: ""), kind: "draft", id: room.id)
+                if room.draft == content && room.attachments == user.attachments {
+                    room.draftSave?.cancel()
+                    room.draft = ""; room.attachments = []
+                    if self.room === room { onDraftCleared() }
+                    try await store.put(TopicDraft(id: room.id, text: ""), kind: "draft", id: room.id)
+                }
                 if topic.title == "新对话" { await renameTopic(topic, title: String(content.prefix(24))) }
                 if speakers.isEmpty { throw ClientError.server(group?.mode == .inviteOnly ? "用 @名字 邀请群成员发言" : "这个会话没有可发言的 Agent，请在通讯录检查成员") }
                 var accepted = false
