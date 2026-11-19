@@ -12,7 +12,11 @@ public enum VCPMarkup {
         public var tool: String; public var status: String; public var ok: Bool?
         public var fields: [Field]; public var content: String
     }
+    public enum Receipt: Sendable, Equatable {
+        case note(String), summary([String], Bool), result(Result, Bool)
+    }
     public enum Segment: Sendable, Equatable {
+        case batch([Receipt], Bool)
         case text(String)
         case think(String, String, Bool)
         case tool(String, String, String, Bool)
@@ -49,7 +53,28 @@ public enum VCPMarkup {
         if let (start, _, _) = opened { ranges.append(NSRange(location: start, length: source.utf16.count - start)) }
         return ranges
     }
-    public static func parse(_ source: String, protectingHTMLLiterals: Bool = false) -> [Segment] {
+    public static func parse(_ source: String, protectingHTMLLiterals: Bool = false, streaming: Bool = false) -> [Segment] {
+        var output: [Segment] = []
+        for domain in ToolBatchMarkup.split(source, streaming: streaming) {
+            switch domain {
+            case .prose(let prose):
+                output += parseLegacy(prose, protectingHTMLLiterals: protectingHTMLLiterals, markers: markers)
+            case .receipt(let body, let closed):
+                // Only summaries and results are structural inside a receipt; other tool output is inert text.
+                let parts: [Receipt] = parseLegacy(body, protectingHTMLLiterals: true, markers: [resultStart, "[本轮工具调用摘要:]"]).compactMap {
+                    switch $0 {
+                    case .text(let text): return .note(text.trimmingCharacters(in:.whitespacesAndNewlines))
+                    case .summary(let items, let complete): return items.isEmpty ? nil : .summary(items,complete)
+                    case .result(let result, let complete): return .result(result,complete)
+                    default: return nil
+                    }
+                }
+                if !parts.isEmpty || !closed { output.append(.batch(parts,closed)) }
+            }
+        }
+        return output
+    }
+    private static func parseLegacy(_ source: String, protectingHTMLLiterals: Bool, markers: [String]) -> [Segment] {
         let s = source as NSString
         var literalRanges = fences(source)
         if protectingHTMLLiterals {
