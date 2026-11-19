@@ -14,8 +14,9 @@ struct ConversationsHome: View {
     @State private var summaries: [String:ConversationSummary] = [:]
     @State private var error: String?
     private var palette: WorkspacePalette { .init(theme: model.appearance.theme) }
-    private var topics: [ChatTopic] { model.topics.sorted { $0.updatedAt > $1.updatedAt }.filter { query.isEmpty || (name($0) + " " + $0.title + " " + (summaries[$0.id]?.display ?? "")).localizedCaseInsensitiveContains(query) } }
+    private var topics: [ChatTopic] { model.recentTopics(model.topics).filter { query.isEmpty || (name($0) + " " + $0.title + " " + (summaries[$0.id]?.display ?? "")).localizedCaseInsensitiveContains(query) } }
     var body: some View {
+        let topics = self.topics
         VStack(spacing: 0) {
             WorkspaceHeader(title: "会话",subtitle: "VCPCHAT",palette: palette) {
                 WorkspaceActivityButton(model: model,action: activity)
@@ -65,7 +66,7 @@ struct ConversationsHome: View {
     }
     private func name(_ topic: ChatTopic) -> String { model.agents.first { $0.id == topic.ownerId }?.name ?? model.groups.first { $0.id == topic.ownerId }?.name ?? "已删除的联系人" }
     private func image(_ topic: ChatTopic) -> String { model.agents.first { $0.id == topic.ownerId }?.avatarUrl ?? model.groups.first { $0.id == topic.ownerId }?.avatarUrl ?? "" }
-    private func date(_ topic: ChatTopic) -> String { let value = Date(timeIntervalSince1970: topic.updatedAt); return Calendar.current.isDateInToday(value) ? value.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).locale(Locale(identifier: "zh_CN"))) : value.formatted(.dateTime.month().day().locale(Locale(identifier: "zh_CN"))) }
+    private func date(_ topic: ChatTopic) -> String { let time = TopicSortMode.activity.date(for: topic, lastMessage: model.lastMessageTimes[topic.id]); guard time > 0 else { return "—" }; let value = Date(timeIntervalSince1970: time); return Calendar.current.isDateInToday(value) ? value.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).locale(Locale(identifier: "zh_CN"))) : value.formatted(.dateTime.month().day().locale(Locale(identifier: "zh_CN"))) }
 }
 struct WorkspaceActivityButton: View {
     let model: ChatViewModel
