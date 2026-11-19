@@ -272,9 +272,17 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     static let shared = IslandPool()
     private var idle: [WKWebView] = []
     private var active: [UUID: WKWebView] = [:]
+    @ObservationIgnored private var parked: [UUID:() -> Void] = [:]
     var revision = 0
-    func take(_ id: UUID, limit: Int) -> WKWebView? {
+    func attach(_ id: UUID) { parked[id] = nil }
+    func park(_ id: UUID, evict: @escaping () -> Void) {
+        parked[id] = evict
+        revision += 1
+    }
+    func take(_ id: UUID, speculative: Bool) -> WKWebView? {
         if let view = active[id] { return view }
+        let limit = speculative ? TranscriptRenderBuffer.parkedLimit : TranscriptRenderBuffer.visibleLimit
+        if !speculative, active.count >= limit { parked.values.first?() }
         guard active.count < limit else { return nil }
         let view: WKWebView
         if let reusable = idle.popLast() { view = reusable }
@@ -298,6 +306,7 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
         return view
     }
     func release(_ id: UUID) {
+        parked[id] = nil
         guard let view = active.removeValue(forKey: id) else { return }
         view.stopLoading(); (view.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme)?.invalidate(); view.setAllMediaPlaybackSuspended(true)
         view.navigationDelegate = nil; view.uiDelegate = nil
@@ -323,9 +332,9 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     @ObservationIgnored private var latest: Input?
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var updateTask: Task<Void,Never>?
-    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?, limit: Int = 3, initialWidth: CGFloat? = nil) {
+    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?, speculative: Bool = false, initialWidth: CGFloat? = nil) {
         guard let runtime = IslandScripts.runtime else { failed = true; failureMessage = "气泡渲染组件缺失，请更新 App"; return }
-        guard let web = view ?? IslandPool.shared.take(id, limit: limit) else { return }
+        guard let web = view ?? IslandPool.shared.take(id, speculative: speculative) else { return }
         if view == nil, let initialWidth { web.frame = CGRect(x: 0,y: 0,width: initialWidth,height: height) }
         let imageScheme=web.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme
         let contextChanged=imageScheme?.stickers != stickers || imageScheme?.owner != owner
@@ -462,11 +471,13 @@ struct HTMLIsland: View {
         guard visible else { return }
         let needsAttachment = controller?.view == nil
         let host = controller ?? slot.flatMap { buffer?.checkout($0) } ?? IslandController()
-        if controller == nil { controller = host }
+        if controller == nil {
+            if host.view == nil { host.height = reservedHeight }
+            controller = host
+        }
         let id=messageID, value=source, variant=heightVariant
         host.remember = { [weak memory] h,w in memory?.rememberIslandHeight(h,messageID:id,source:value,width:w,variant:variant) }
-        host.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner,
-                   limit: buffer == nil ? 3 : TranscriptRenderBuffer.visibleLimit)
+        host.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner)
         if needsAttachment { host.view?.setAllMediaPlaybackSuspended(!options.media) }
     }
     private func release() {

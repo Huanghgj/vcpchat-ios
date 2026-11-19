@@ -1,5 +1,8 @@
 import SwiftUI
 import VChatCore
+#if os(iOS)
+import UIKit
+#endif
 
 public enum TranscriptPreloadDepth {
     public static let key = "transcript.preloadDepth"
@@ -35,7 +38,7 @@ public struct TranscriptRenderItem: Equatable {
     let streaming: Bool
 
     public init(id: String, source: String, role: String, depth: Int, rules: [RegexRule], streaming: Bool) {
-        self.id = id; self.role = role; self.depth = depth; self.rules = rules
+        self.id = id; self.role = role; self.depth = rules.isEmpty ? 0 : depth; self.rules = rules
         // Only the displayed streaming row consumes live frames.
         self.source = streaming ? "" : source
         self.streaming = streaming
@@ -66,16 +69,18 @@ private struct PreparationContext: Equatable {
     private var generation = UUID()
     private var eligible: Set<String> = []
     private var parked: [IslandSlot:IslandController] = [:]
+    // Preserve interaction state ahead of speculative documents when the window is full.
+    private var lastViewed: [IslandSlot] = []
     private var checkedOut: [IslandSlot:UUID] = [:]
     private struct Assets {
         var item: TranscriptRenderItem
         var islands: [(IslandSlot,String)] = []
         var images: [MessageMedia] = []
-        var fetched = false
     }
     private var assets: [String:Assets] = [:]
     private var context: PreparationContext?
     private struct ImageKey: Hashable { var message: String; var source: String }
+    private var attemptedImages: Set<ImageKey> = []
     private var images: [ImageKey:(raster: MediaRaster, expires: Date, cost: Int)] = [:]
     public init() {}
 
@@ -83,6 +88,8 @@ private struct PreparationContext: Equatable {
 
     func checkout(_ slot: IslandSlot) -> IslandController {
         let host = parked.removeValue(forKey: slot) ?? IslandController()
+        lastViewed.removeAll { $0 == slot }
+        IslandPool.shared.attach(host.id)
         checkedOut[slot] = host.id
         return host
     }
@@ -90,17 +97,33 @@ private struct PreparationContext: Equatable {
     func checkin(_ host: IslandController, at slot: IslandSlot) {
         guard checkedOut[slot] == host.id else { host.unmount(); return }
         checkedOut[slot] = nil
-        guard eligible.contains(slot.message), host.view != nil, !host.failed, parked.count < Self.parkedLimit
+        guard eligible.contains(slot.message), host.view != nil, !host.failed
         else { host.unmount(); return }
-        host.view?.setAllMediaPlaybackSuspended(true)
+        if parked.count >= Self.parkedLimit,
+           let victim = parked.keys.first(where: { !lastViewed.contains($0) }) ?? lastViewed.first {
+            discard(victim)
+        }
+        lastViewed.removeAll { $0 == slot }
+        lastViewed.append(slot)
+        park(host, at:slot)
+    }
+
+    private func park(_ host: IslandController, at slot: IslandSlot) {
         parked[slot] = host
+        host.view?.setAllMediaPlaybackSuspended(true)
+        IslandPool.shared.park(host.id) { [weak self] in self?.discard(slot) }
+    }
+
+    private func discard(_ slot: IslandSlot) {
+        lastViewed.removeAll { $0 == slot }
+        parked.removeValue(forKey:slot)?.unmount()
     }
 
     func clear() {
         generation = UUID()
         eligible.removeAll()
         for host in parked.values { host.unmount() }
-        parked.removeAll(); assets.removeAll(); images.removeAll(); context = nil
+        parked.removeAll(); lastViewed.removeAll(); assets.removeAll(); images.removeAll(); attemptedImages.removeAll(); context = nil
         // Visible hosts remain owned by their rows until checkin.
     }
 
@@ -117,16 +140,16 @@ private struct PreparationContext: Equatable {
         eligible = Set(items.map(\.id))
         assets = assets.filter { eligible.contains($0.key) }
         images = images.filter { eligible.contains($0.key.message) && $0.value.expires > Date() }
-        for key in Array(parked.keys) where !eligible.contains(key.message) { parked.removeValue(forKey:key)?.unmount() }
+        for key in Array(parked.keys) where !eligible.contains(key.message) { discard(key) }
 
         for item in items where assets[item.id]?.item != item {
             images = images.filter { $0.key.message != item.id }
-            for slot in Array(parked.keys) where slot.message == item.id { parked.removeValue(forKey:slot)?.unmount() }
+            attemptedImages = attemptedImages.filter { $0.message != item.id }
+            for slot in Array(parked.keys) where slot.message == item.id { discard(slot) }
         }
 
         // Let visible work begin first; fast flings cancel before launching speculative work.
         do { try await Task.sleep(for: .milliseconds(70)) } catch { return }
-        var wanted: [IslandSlot] = []
         for item in items {
             guard current() else { return }
             if assets[item.id]?.item != item {
@@ -146,52 +169,67 @@ private struct PreparationContext: Equatable {
                         }
                     }
                     for (index, block) in blocks.enumerated() {
-                        if case .html(let html) = block { result.islands.append((IslandSlot(message: item.id,index: index),html)) }
+                        if case .html(let html) = block,
+                           html.range(of: #"<(?:video|audio)\b"#,options:[.regularExpression,.caseInsensitive]) == nil {
+                            result.islands.append((IslandSlot(message:item.id,index:index),html))
+                        }
                         block.collectImages(into: &result.images)
                     }
                 }
                 assets[item.id] = result
             }
-            guard let value = assets[item.id] else { continue }
-            for (slot, html) in value.islands where checkedOut[slot] == nil && wanted.count < Self.parkedLimit {
-                wanted.append(slot)
-                if parked[slot] == nil, parked.count >= Self.parkedLimit,
-                   let victim = parked.keys.first(where: { !wanted.contains($0) }) { parked.removeValue(forKey: victim)?.unmount() }
-                let host = parked[slot] ?? IslandController()
+        }
+        guard current() else { return }
+
+        // Resolve priority after the asynchronous parse pass, using the latest row leases.
+        var wanted = Set(lastViewed)
+        for item in items {
+            for (slot,html) in assets[item.id]?.islands ?? [] where checkedOut[slot] == nil {
+                if !wanted.contains(slot) {
+                    guard wanted.count < Self.parkedLimit else { continue }
+                    wanted.insert(slot)
+                }
+                guard parked[slot] == nil else { continue }
+                if parked.count >= Self.parkedLimit, let victim = parked.keys.first(where: { !wanted.contains($0) }) {
+                    discard(victim)
+                }
+                let host = IslandController()
                 let variant = String(next.shell.hashValue)
                 host.remember = { [weak memory] height,width in
                     memory?.rememberIslandHeight(height,messageID:slot.message,source:html,width:width,variant:variant)
                 }
                 host.mount(next.shell,source:html,streaming:false,media:next.options.media,stickers:next.stickers,
-                           owner:next.owner,limit:Self.parkedLimit,initialWidth:next.width)
-                if let web = host.view {
-                    web.setAllMediaPlaybackSuspended(true)
-                    parked[slot] = host
-                }
+                           owner:next.owner,speculative:true,initialWidth:next.width)
+                if host.view != nil { park(host, at:slot) }
             }
         }
-        guard current() else { return }
-        for slot in Array(parked.keys) where !wanted.contains(slot) { parked.removeValue(forKey:slot)?.unmount() }
 
-        // Download serially after parsing, so a slow image cannot delay preparing other cards.
+        // A single image-heavy message must not start an unbounded series of downloads.
+        var seen: Set<ImageKey> = [], candidates: [ImageKey] = []
         for item in items {
-            guard let asset = assets[item.id], !asset.fetched else { continue }
-            for media in asset.images {
-                guard current() else { return }
-                let key = ImageKey(message: item.id,source: media.source)
-                guard images[key] == nil, let url = await StickerResolver.shared.url(media.source,in:next.stickers),
-                      current(), let reply = try? await RemoteImageStore.shared.resource(url,owner:next.owner),
-                      current(), reply.expires > Date(),
-                      let raster = try? await NativeMediaLoader.shared.localImage(reply.data), current() else { continue }
-                let size = CGSize(width:raster.width,height:raster.height)
-                memory?.rememberImage(size,item.id,media.source)
-                let cost = raster.image.bytesPerRow * raster.image.height + (raster.animation?.count ?? 0)
-                if cost + images.values.reduce(0, { $0 + $1.cost }) <= 16 * 1024 * 1024 {
-                    images[key] = (raster, reply.expires, cost)
-                }
+            for media in assets[item.id]?.images ?? [] {
+                let key = ImageKey(message:item.id,source:media.source)
+                if seen.insert(key).inserted { candidates.append(key) }
+                if candidates.count == 16 { break }
             }
+            if candidates.count == 16 { break }
+        }
+        attemptedImages.formIntersection(seen)
+        images = images.filter { seen.contains($0.key) }
+        for key in candidates where !attemptedImages.contains(key) {
             guard current() else { return }
-            assets[item.id]?.fetched = true
+            // A slow photo cannot delay another card's HTML or Markdown.
+            guard let url = await StickerResolver.shared.url(key.source,in:next.stickers), MessageMedia.isSafe(url.absoluteString),
+                  current(), let reply = try? await RemoteImageStore.shared.resource(url,owner:next.owner), current()
+            else { if current() { attemptedImages.insert(key) }; continue }
+            guard reply.expires > Date(), let raster = try? await NativeMediaLoader.shared.localImage(reply.data), current()
+            else { if current() { attemptedImages.insert(key) }; continue }
+            memory?.rememberImage(CGSize(width:raster.width,height:raster.height),key.message,key.source)
+            let cost = raster.image.bytesPerRow * raster.image.height + (raster.animation?.count ?? 0)
+            if cost + images.values.reduce(0, { $0 + $1.cost }) <= 16 * 1024 * 1024 {
+                images[key] = (raster, reply.expires, cost)
+            }
+            attemptedImages.insert(key)
         }
     }
 }

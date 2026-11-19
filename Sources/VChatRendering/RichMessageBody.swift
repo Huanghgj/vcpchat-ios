@@ -100,7 +100,7 @@ public struct RichMessageBody: View {
     @Environment(\.renderedMessageID) private var messageID
     private var parsedKey:String { transcriptRow ? messageID : "" }
     private var transcriptRow: Bool
-    private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:depth) }
+    private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:rules.isEmpty ? 0 : depth) }
     @State private var rendering = RenderState()
     @State private var visible = false
     @Environment(\.colorScheme) private var scheme
@@ -128,7 +128,7 @@ public struct RichMessageBody: View {
         .lineLimit(nil)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)
-        .onChange(of: RenderState.Input(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth), initial: true) { _, input in
+        .onChange(of: input, initial: true) { _, input in
             if visible && phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } else { rendering.cancel() }
         }
         .onAppear { visible = true; if phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } }

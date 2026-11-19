@@ -163,6 +163,35 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertTrue(rows(0,[],10).isEmpty)
     }
 
+    @MainActor func testNativeChatListPreparesBothSidesAfterJumpingIntoHistory() async throws {
+        let model = ChatViewModel(), topic = ChatTopic(ownerId:"fixture")
+        let messages = (0..<64).map { index in
+            StoredMessage(id:"row-\(index)",topicID:topic.id,role:"assistant",
+                          content:"**第 \(index) 条**\n" + String(repeating:"读历史记录。\n",count:5))
+        }
+        let room = ChatRoom(id:topic.id,messages:messages)
+        model.rooms = [topic.id:room]; model.activeTopicID = topic.id; model.topics = [topic]; model.loading = false
+        let suite = "vchat-test-" + UUID().uuidString, defaults = try XCTUnwrap(UserDefaults(suiteName:suite))
+        defer { defaults.removePersistentDomain(forName:suite) }
+        defaults.set(10,forKey:TranscriptPreloadDepth.key)
+        let window = try host(ChatView(model:model).frame(height:560).defaultAppStorage(defaults).environment(\.scenePhase,.active))
+        defer { window.isHidden = true }
+        try await eventually("native transcript ready at the latest message") {
+            guard let list = self.find(UICollectionView.self,in:window) else { return false }
+            return list.indexPathsForVisibleItems.contains { $0.item >= 62 }
+        }
+        let list = try XCTUnwrap(find(UICollectionView.self,in:window))
+        let section = try XCTUnwrap((0..<list.numberOfSections).first { list.numberOfItems(inSection:$0) >= 64 })
+        list.scrollToItem(at:IndexPath(item:32,section:section),at:.centeredVertically,animated:false)
+        try await eventually("messages eight rows beyond both visible edges have already been parsed") {
+            let indices = list.indexPathsForVisibleItems.filter { $0.section == section }.map(\.item)
+            guard indices.contains(32), let lo = indices.min(), let hi = indices.max() else { return false }
+            return [lo - 8,hi + 8].allSatisfy {
+                room.layoutMemory.finishedReplies.object(forKey: "row-\($0)" as NSString) != nil
+            }
+        }
+    }
+
     @MainActor func testUnseenCardIsPreparedAndRecycledRowKeepsItsLiveDocument() async throws {
         let state = NearbyCardFixture()
         let window = try host(NearbyCardViews(state:state))
