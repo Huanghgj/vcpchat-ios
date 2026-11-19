@@ -6,18 +6,27 @@ struct VCPCardView: View {
     var options: RenderOptions
     @ViewBuilder var body: some View {
         switch segment {
+        case .batch(let parts, let closed):
+            if parts.isEmpty && !closed {
+                Label("正在接收工具结果", systemImage: "ellipsis").font(.caption).foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                        switch part {
+                        case .summary(let items, let done): ToolSummary(items:items, closed:done)
+                        case .result(let result, let done): resultCard(result, closed:done, receipt:true)
+                        case .note(let text): RichMessageBody(receipt: text, options: options).font(.callout)
+                        }
+                    }
+                }
+            }
         case .text(let text): RichMessageBody(text, options: options)
         case .think(let title, let text, let closed):
             FoldedCard(title: title, icon: "sparkles", subtitle: closed ? "" : "进行中", initiallyOpen: !closed,motion: options.motion) { RichMessageBody(text, options: options) }
         case .tool(let name, let command, let body, let closed):
             FoldedCard(title: name, icon: "wrench.and.screwdriver", subtitle: closed ? command : "输入中 · " + command, initiallyOpen: !closed,motion: options.motion) { Text(verbatim: body).font(.callout.monospaced()).modifier(MessageTextSelection()).frame(maxWidth: .infinity, alignment: .leading) }
         case .result(let result, let closed):
-            FoldedCard(title: result.tool.isEmpty ? "工具结果" : result.tool, icon: result.ok == false ? "exclamationmark.triangle" : "checkmark.circle", subtitle: closed ? result.status : "接收中", initiallyOpen: !closed, failed: result.ok == false,motion: options.motion) {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(result.fields.enumerated()), id: \.offset) { _, field in VStack(alignment: .leading, spacing: 3) { Text(field.key).font(.caption).foregroundStyle(.secondary); Text(verbatim: field.value).modifier(MessageTextSelection()) } }
-                    if !result.content.isEmpty { RichMessageBody(result.content, options: options) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
+            resultCard(result, closed:closed, receipt:false)
         case .diary(let entry, let closed):
             VStack(alignment: .leading, spacing: 10) {
                 HStack { Label(entry.update ? "日记修改" : entry.title, systemImage: "book.closed").font(.headline); Spacer(); Text(closed ? entry.date : "写入中").font(.caption).foregroundStyle(.secondary) }
@@ -29,13 +38,53 @@ struct VCPCardView: View {
                 if !entry.tag.isEmpty { Text(entry.tag).font(.caption).foregroundStyle(.secondary) }
             }.padding(14).background(.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
         case .summary(let items, let closed):
-            VStack(alignment: .leading, spacing: 6) { Label(closed ? "本轮工具调用" : "工具摘要 · 接收中", systemImage: "checklist").font(.caption).foregroundStyle(.secondary); ForEach(Array(items.enumerated()), id: \.offset) { _, item in Text("• " + item).font(.callout) } }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+            ToolSummary(items:items, closed:closed)
         case .divider(let role, let end):
-            HStack { Divider(); Text((role == "user" ? "用户" : role == "system" ? "系统" : "助手") + " · " + (end ? "结束" : "开始")).font(.caption).foregroundStyle(.secondary).fixedSize(); Divider() }
+            HStack(spacing: 8) {
+                Rectangle().fill(.secondary.opacity(0.25)).frame(height: 1)
+                Text((role == "user" ? "用户" : role == "system" ? "系统" : "助手") + " · " + (end ? "结束" : "开始"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize()
+                Rectangle().fill(.secondary.opacity(0.25)).frame(height: 1)
+            }.fixedSize(horizontal:false,vertical:true).allowsHitTesting(false)
         case .push(let text, let closed):
             FoldedCard(title: "桌面推送", icon: "desktopcomputer", subtitle: closed ? "仅展示，不执行" : "接收中", initiallyOpen: false,motion: options.motion) { Text(verbatim: text).font(.callout.monospaced()).modifier(MessageTextSelection()) }
         }
     }
+    @ViewBuilder private func resultCard(_ result: VCPMarkup.Result, closed: Bool, receipt: Bool) -> some View {
+        let title = result.tool.isEmpty ? "工具结果" : result.tool
+        let icon = result.ok == false ? "exclamationmark.triangle" : "checkmark.circle"
+        if result.fields.isEmpty && result.content.isEmpty {
+            Label([title, result.status].filter { !$0.isEmpty }.joined(separator:" · "),systemImage:icon)
+                .font(.callout).foregroundStyle(.secondary)
+        } else {
+            FoldedCard(title:title,icon:icon,subtitle:closed ? result.status : "接收中",
+                       initiallyOpen:!closed,failed:result.ok == false,motion:options.motion) {
+                VStack(alignment:.leading,spacing:10) {
+                    ForEach(Array(result.fields.enumerated()), id: \.offset) { _, field in
+                        VStack(alignment:.leading,spacing:3) {
+                            Text(field.key).font(.caption).foregroundStyle(.secondary)
+                            if receipt { RichMessageBody(receipt: field.value, options: options) }
+                            else { Text(verbatim:field.value).modifier(MessageTextSelection()) }
+                        }
+                    }
+                    if !result.content.isEmpty {
+                        if receipt { RichMessageBody(receipt: result.content, options: options) }
+                        else { RichMessageBody(result.content, options:options) }
+                    }
+                }.frame(maxWidth:.infinity,alignment:.leading)
+            }
+        }
+    }
+}
+private struct ToolSummary: View {
+    let items: [String]; let closed: Bool
+    var body: some View {
+        VStack(alignment:.leading,spacing:6) {
+            Label(closed ? "本轮工具调用" : "工具摘要 · 接收中",systemImage:"checklist").font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(items.enumerated()),id:\.offset) { _, item in Text("• " + item).font(.callout) }
+        }.padding(12).frame(maxWidth:.infinity,alignment:.leading).background(.secondary.opacity(0.05),in:RoundedRectangle(cornerRadius:12))
+    }
+
 }
 private struct FoldedCard<Content: View>: View {
     var title: String; var icon: String; var subtitle: String

@@ -31,3 +31,7 @@ MermaidKit 2.10.2，源码版本 `8556a1b8`。Copyright 2026 Clint Ecker。
 ### 双曲场图
 
 场图绘制、话题团展开、节点查询和黎曼切片使用 [VCPChat 双曲场图](https://github.com/lioensky/VCPChat/tree/a070768d623519a7b69abedd1c4340e6030076f5/modules/warpedFieldAtlas)（VCPChat 贡献者，CC BY-NC-SA 4.0）。iOS 适配了本地资源加载、手机布局、触屏选点和双指缩放；数据通过原生只读接口取得。改编沿用同一许可。
+
+### V5.2 聊天渲染与表情修复
+
+iOS 聊天渲染参考 [VCPChat V5.2 的流式更新](https://github.com/lioensky/VCPChat/commit/76b5704) 以及[表情目录匹配](https://github.com/lioensky/VCPChat/blob/e9615e743f0e12948c6d664066280601e34b8b98/modules/renderer/emoticonUrlFixer.js)（VCPChat 贡献者，CC BY-NC-SA 4.0）。使用 SwiftUI、独立气泡 WKWebView 和消息专用图像缓存实现对应行为；未引入 Electron。

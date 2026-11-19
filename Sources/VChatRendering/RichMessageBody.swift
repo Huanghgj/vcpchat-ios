@@ -9,11 +9,42 @@ import AppKit
 
 @MainActor @Observable private final class RenderState {
     var blocks: [RenderBlock] = []
+    var hasRendered = false
     var streaming = false
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var worker: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
-    struct Input: Equatable { var source: String; var options: RenderOptions; var dark: Bool; var streaming: Bool; var rules: [RegexRule]; var role: String; var depth: Int }
+    @ObservationIgnored private var prefixCache: (source: String, dark: Bool, options: RenderOptions, blocks: [RenderBlock])?
+    @ObservationIgnored private var openFence: (source:String,tail:StreamFenceTail)?
+    private func projection(_ input:Input) -> StreamFenceTail? {
+        guard input.streaming, input.options.enabled, input.rules.isEmpty else { openFence=nil; return nil }
+        var next: StreamFenceTail?
+        if let old=openFence, input.source.utf8.starts(with:old.source.utf8),
+           let end=input.source.utf8.index(input.source.utf8.startIndex, offsetBy:old.source.utf8.count, limitedBy:input.source.utf8.endIndex),
+           let split=String.Index(end,within:input.source) { next=old.tail.appending(input.source[split...]) }
+        if next==nil { next=StreamFenceTail.split(input.source) }
+        openFence=next.map { (input.source,$0) }
+        return next
+    }
+    private func render(_ input: Input) async throws -> [RenderBlock] {
+        if input.receipt {
+            return try await MessageRenderer.shared.receiptBlocks(input.source, media: input.options.enabled && input.options.media)
+        }
+        if let tail=projection(input) {
+            let prefix: [RenderBlock]
+            if let c=prefixCache, c.source == tail.prefix, c.dark==input.dark, c.options==input.options { prefix=c.blocks }
+            else {
+                prefix=try await MessageRenderer.shared.render(tail.prefix,options:input.options,dark:input.dark,streaming:true)
+                try Task.checkCancellation()
+                prefixCache=(tail.prefix,input.dark,input.options,prefix)
+            }
+            return prefix + [.code(tail.language,tail.body,[])]
+        }
+        prefixCache=nil
+        return try await MessageRenderer.shared.render(input.source,options:input.options,dark:input.dark,
+            streaming:input.streaming,rules:input.rules,role:input.role,depth:input.depth)
+    }
+    struct Input: Equatable { var source: String; var options: RenderOptions; var dark: Bool; var streaming: Bool; var rules: [RegexRule]; var role: String; var depth: Int; var receipt: Bool }
     func update(_ input: Input) {
         pending = input
         guard worker == nil else { return }
@@ -22,16 +53,18 @@ import AppKit
             while generation == id, let input = pending, !Task.isCancelled {
                 pending = nil
                 do {
-                    let rendered = try await MessageRenderer.shared.render(input.source, options: input.options, dark: input.dark, streaming: input.streaming, rules: input.rules, role: input.role, depth: input.depth)
-                    if !Task.isCancelled && generation == id { blocks = rendered; streaming = input.streaming }
+                    let rendered = try await render(input)
+                    if !Task.isCancelled && generation == id, pending == nil || input.streaming && pending?.streaming == true && pending?.source.hasPrefix(input.source) == true {
+                        blocks = rendered; streaming = input.streaming; hasRendered = true
+                    }
                     try await Task.sleep(for: .milliseconds(70))
                 } catch is CancellationError { break }
-                catch { blocks = [.literal("消息渲染失败：" + error.localizedDescription)] }
+                catch { if generation == id, !Task.isCancelled, pending == nil { blocks = [.literal("消息渲染失败：" + error.localizedDescription)] } }
             }
             if generation == id { worker = nil }
         }
     }
-    func cancel() { generation = UUID(); worker?.cancel(); worker = nil; pending = nil }
+    func cancel() { generation = UUID(); worker?.cancel(); worker = nil; pending = nil; prefixCache=nil; openFence=nil }
 }
 public struct RichMessageBody: View {
     public var source: String
@@ -41,27 +74,36 @@ public struct RichMessageBody: View {
     public var role: String
     public var depth: Int
     public var expandsToFill: Bool
+    private var receipt = false
     @State private var rendering = RenderState()
     @State private var visible = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var phase
     public init(_ source: String, options: RenderOptions = RenderOptions(), streaming: Bool = false, rules: [RegexRule] = [], role: String = "assistant", depth: Int = 0, expandsToFill: Bool = true) { self.source = source; self.options = options; self.streaming = streaming; self.rules = rules; self.role = role; self.depth = depth; self.expandsToFill = expandsToFill }
+    init(receipt source: String, options: RenderOptions) {
+        self.init(source, options: options)
+        receipt = true
+    }
+    private var input: RenderState.Input {
+        .init(source:source, options:options, dark:scheme == .dark, streaming:streaming,
+              rules:rules, role:role, depth:depth, receipt:receipt)
+    }
     private var plain: Bool { rules.isEmpty && (!options.enabled || (!source.contains("http://") && !source.contains("https://") && !(source.contains("@") && source.contains(".")) && (!source.hasPrefix("- ") && !source.contains("\n- ") && !source.contains("\n1. ") && !source.hasPrefix("1. ") && !source.contains(where: { "`~*#_[]<>$|\\".contains($0) })))) }
     public var body: some View {
         Group {
             if plain { Text(verbatim: source).modifier(MessageTextSelection()) }
-            else if rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
+            else if !rendering.hasRendered && rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
             else { NativeBlocks(blocks: rendering.blocks, options: options,streaming: rendering.streaming).equatable() }
         }
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)
-        .onChange(of: RenderState.Input(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth), initial: true) { _, input in
+        .onChange(of: input, initial: true) { _, input in
             if visible && phase != .background && !plain { rendering.update(input) } else { rendering.cancel() }
         }
-        .onAppear { visible = true; if phase != .background && !plain { rendering.update(.init(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth)) } }
+        .onAppear { visible = true; if phase != .background && !plain { rendering.update(input) } }
         .onDisappear { visible = false; rendering.cancel() }
         .onChange(of: phase) { _, next in
             if next == .background { rendering.cancel() }
-            else if visible && !plain { rendering.update(.init(source: source,options: options,dark: scheme == .dark,streaming: streaming,rules: rules,role: role,depth: depth)) }
+            else if visible && !plain { rendering.update(input) }
         }
         .environment(\.openURL, OpenURLAction { url in ["http", "https", "mailto"].contains(url.scheme) ? .systemAction : .discarded })
     }
