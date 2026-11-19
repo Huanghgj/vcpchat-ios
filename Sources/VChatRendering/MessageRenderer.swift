@@ -22,11 +22,12 @@ public actor MessageRenderer {
     private var escapedStarMarker = ""
     public func render(_ source: String, options: RenderOptions, dark: Bool, streaming: Bool = false, rules: [RegexRule] = [], role: String = "assistant", depth: Int = 0) async throws -> [RenderBlock] {
         try Task.checkCancellation()
-        let source = rules.isEmpty ? source : try await RegexEngine.shared.apply(source, rules: rules, scope: "frontend", role: role, depth: depth)
-        guard options.enabled else { return [.literal(source)] }
+        let filtered = rules.isEmpty ? source : try await RegexEngine.shared.apply(source, rules: rules, scope: "frontend", role: role, depth: depth)
+        guard options.enabled else { return [.literal(filtered)] }
+        let source = options.media ? LooseImageTags.normalize(filtered) : filtered
         self.streaming = streaming
         var output: [RenderBlock] = []
-        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: HTMLIslandPolicy.accepts(source) || HTMLIslandPolicy.containsIsland(source)) {
+        for segment in VCPMarkup.parse(source, protectingHTMLLiterals: source.localizedCaseInsensitiveContains("<div")) {
             switch segment {
             case .text(let prose):
                 for section in HTMLIslandPolicy.extractSections(from: prose) {
@@ -78,7 +79,7 @@ public actor MessageRenderer {
                     if language.lowercased() != "mermaid",!text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("flowchart"),!text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("graph") { text = language.lowercased() + " " + text }
                     return .diagram(text,diagrams.render(text,dark: dark))
                 }
-                return .code(language, restore(node.code), options.code ? highlighted(restore(node.code), language: language) : [])
+                return .code(language, restore(node.code), options.code && !streaming ? highlighted(restore(node.code), language: language) : [])
             case let node as BlockQuote: return .quote(try blocks(node, options: options))
             case let node as OrderedList: return .list(try node.children.map { try blocks($0, options: options) }, Int(node.startIndex))
             case let node as UnorderedList: return .list(try node.children.map { try blocks($0, options: options) }, nil)

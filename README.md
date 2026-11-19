@@ -131,6 +131,14 @@ SwiftUI 原生客户端，为 iPhone 上的日常聊天与多 Agent 协作而设
 
 在 iPhone 聊天时，点击发送按钮或使用已启用的回车发送后，键盘会自动收起。只想多看几行历史时，可点键盘上方的 **收起键盘**，草稿会保留。
 
+### 聊天图片与表情包
+
+原生消息里的远程图片和 HTML 气泡里的普通 HTTPS 图片共用本地缓存。第一次成功加载后，关闭再打开 App 仍可命中；缓存受系统清理、服务器缓存策略和容量限制（128 MiB、最多 2048 项，默认最长 7 天）。VCP 图片服务对固定表情通常返回 `public, max-age=0`；对不含查询参数的命名表情，App 将原图作为聊天的离线副本保留最多 7 天。普通网址仍按缓存时效处理；明确要求 `no-store`、`no-cache` 的图片、登录页和错误响应不会保留。视频、CSS 背景图、动态脚本插入图片和带 `srcset` 的响应式图片不在这套磁盘缓存内。
+
+在「我 → 设置 → 高级渲染」点「从当前 VCP 更新目录」（使用已配置的管理员账号），或导入桌面 `emoticon_library.json`。有目录后，先按文件主名匹配，同名时优先原分类，再按相似度纠错。目录只存分类和文件名，原消息、普通外站图片不改。相对表情地址需配置 File Key；同主机反代的 HTTPS 表情旧 6005 端口会按当前标准 HTTPS 入口解析。可在同一页清除聊天图片缓存。
+
+流式代码围栏在打开时用字面文本更新，收口和终稿再进行规范解析。零缩进的桌面动画卡片在外层闭合后可以启动，其中的脚本可以通过 `container` 找到卡片。追加内容和终稿保留已有图像节点和动画状态；消息被替换时重新创建该气泡。代码块与行内代码里的图片标签仍按示例文字展示。
+
 ### 双曲场图
 
 在 iPhone 的 **发现 → 双曲场图** 打开 VCP 服务上的 Tag 场或 Chunk 场。使用聊天服务器地址和聊天 API Key，服务端需启用 WarpedFieldAtlas 并有对应快照；不需要桌面端或桌面同步。单指拖动、双指缩放或点 ＋／−，点选节点或按名称搜索可查看详情。切换到查询可比较双曲距离与余弦排名；后端支持时可按对话消息查询，或切换到黎曼切片。更新快照后点右上角重新加载。单次响应默认最多 32 MiB，可在场图右上角调高或选择「不限」。
@@ -161,7 +169,7 @@ SwiftUI 原生客户端，为 iPhone 上的日常聊天与多 Agent 协作而设
 
 使用 **Xcode 16 或更新版本** 打开 `VChat.xcodeproj`，选择 **VChat** 和 iPhone 模拟器运行。连接自己的 iPhone 时，在签名设置中选择开发团队。
 
-也可通过 [GitHub Actions · Native iOS Build](https://github.com/silk2onion/vcpchat-ios/actions/workflows/native.yml) 构建模拟器 App 与未签名 IPA。
+本 fork 的 [Native iOS Build](https://github.com/Huanghgj/vcpchat-ios/actions/workflows/native.yml) 在代码 PR 上运行 iPhone 模拟器验证。需要装机时，在 Actions 中选择同一已验证的分支或标签，点击 **Run workflow**；设备任务只编译和检查真机版，未签名 IPA 位于该次运行的 **VChat-iOS-unsigned** 产物中。
 
 在 **macOS 14+**、**Swift 6** 环境下，可从项目目录运行 Mac 客户端：
 

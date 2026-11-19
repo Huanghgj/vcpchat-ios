@@ -1,14 +1,16 @@
 name: Native iOS Build
 on:
   pull_request:
-    paths: ['Sources/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
+    paths: ['Sources/**', 'IntegrationTests/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   native:
-    runs-on: macos-15
-    timeout-minutes: 40
+    if: github.event_name == 'pull_request'
+    # The simulator can run on Intel; the iPhone archive still targets arm64.
+    runs-on: macos-15-intel
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -22,18 +24,25 @@ jobs:
           sw_vers | tee "$VCHAT_ARTIFACTS/results/environment.log"
           xcodebuild -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
           swift -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
-      - name: Build iOS simulator app
-        run: |
-          set -o pipefail
-          xcodebuild -project VChat.xcodeproj -scheme VChat -configuration Debug \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
-            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
-            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual build 2>&1 | tee "$VCHAT_ARTIFACTS/results/ios-build.log"
-      - name: Launch native app on simulator
+      - name: Select the iPhone simulator
         run: |
           set -euo pipefail
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if "iPhone" in x["name"]))')
+          echo "VCHAT_SIMULATOR=$device" >> "$GITHUB_ENV"
+      - name: Build the simulator app and its tests together
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing -project VChat.xcodeproj -scheme VChat -configuration Debug \
+            -destination "platform=iOS Simulator,id=$VCHAT_SIMULATOR" \
+            -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
+            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
+            ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/ios-build.log"
+      - name: Launch native app on simulator
+        id: launch
+        run: |
+          set -euo pipefail
+          device="$VCHAT_SIMULATOR"
           xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           app="$VCHAT_ARTIFACTS/tmp/DerivedData/Build/Products/Debug-iphonesimulator/VChat.app"
@@ -47,6 +56,51 @@ jobs:
           mkdir -p "$VCHAT_ARTIFACTS/products"
           xcrun simctl io "$device" screenshot "$VCHAT_ARTIFACTS/products/VChat-iOS.png"
           ditto -c -k --keepParent "$app" "$VCHAT_ARTIFACTS/products/VChat-iOS-simulator.zip"
+      - name: Test iPhone keyboard and atlas bridge
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -project VChat.xcodeproj -scheme VChat -configuration Debug \
+            -destination "platform=iOS Simulator,id=$VCHAT_SIMULATOR" \
+            -parallel-testing-enabled NO -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
+            -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
+            ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
+      - name: Save simulator app
+        if: ${{ !cancelled() && steps.launch.outcome == 'success' }}
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: VChat-iOS-simulator
+          path: |
+            ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/products/VChat-iOS-simulator.zip
+            ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/products/VChat-iOS.png
+          if-no-files-found: error
+      - name: Save build logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: VChat-build-logs
+          path: ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/results/
+          if-no-files-found: warn
+  device:
+    name: Package iPhone release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare isolated outputs
+        run: |
+          echo "VCHAT_ARTIFACTS=$HOME/CodexArtifacts/vchat-native-ci-${{ github.run_id }}" >> "$GITHUB_ENV"
+      - name: Xcode environment
+        run: |
+          mkdir -p "$VCHAT_ARTIFACTS/results"
+          sw_vers | tee "$VCHAT_ARTIFACTS/results/environment.log"
+          xcodebuild -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
+          swift -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
+      - name: Check the architecture verifier on this runner
+        run: xcrun lipo /bin/ls -verify_arch "$(uname -m)"
       - name: Build unsigned iPhone app
         run: |
           set -o pipefail
@@ -56,25 +110,23 @@ jobs:
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
             CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$VCHAT_ARTIFACTS/results/iphone-build.log"
       - name: Package unsigned IPA
+        id: ipa
         run: |
           set -euo pipefail
           app="$VCHAT_ARTIFACTS/tmp/DeviceDerivedData/Build/Products/Release-iphoneos/VChat.app"
-          test -f "$app/VChat"
+          test -x "$app/VChat"
+          xcrun lipo "$app/VChat" -verify_arch arm64
+          atlas_page=$(find "$app" -type f -path '*/FieldAtlas/index.html' -print)
+          test -s "$atlas_page" || { echo "::error::Missing packaged FieldAtlas/index.html"; exit 1; }
+          for asset in metric-slice.js atlas-app.js mobile.js atlas.css mobile.css; do
+            test -s "$(dirname "$atlas_page")/$asset" || { echo "::error::Missing packaged FieldAtlas/$asset"; exit 1; }
+          done
           mkdir -p "$VCHAT_ARTIFACTS/tmp/ipa/Payload" "$VCHAT_ARTIFACTS/products"
           ditto "$app" "$VCHAT_ARTIFACTS/tmp/ipa/Payload/VChat.app"
           (cd "$VCHAT_ARTIFACTS/tmp/ipa" && zip -qry "$VCHAT_ARTIFACTS/products/VChat-unsigned.ipa" Payload)
           unzip -t "$VCHAT_ARTIFACTS/products/VChat-unsigned.ipa"
-      - name: Save simulator app
-        if: always()
-        uses: actions/upload-artifact@v7.0.2
-        with:
-          name: VChat-iOS-simulator
-          path: |
-            ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/products/VChat-iOS-simulator.zip
-            ~/CodexArtifacts/vchat-native-ci-${{ github.run_id }}/products/VChat-iOS.png
-          if-no-files-found: error
       - name: Save unsigned IPA
-        if: always()
+        if: ${{ !cancelled() && steps.ipa.outcome == 'success' }}
         uses: actions/upload-artifact@v7.0.2
         with:
           name: VChat-iOS-unsigned
