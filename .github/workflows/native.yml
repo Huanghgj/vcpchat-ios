@@ -84,12 +84,13 @@ jobs:
   device:
     name: Package iPhone release
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
+          ref: 860f79835395fae0f3893bf3ac1e8ab3966a63f9
       - name: Prepare isolated outputs
         run: |
           echo "VCHAT_ARTIFACTS=$HOME/CodexArtifacts/vchat-native-ci-${{ github.run_id }}" >> "$GITHUB_ENV"
@@ -99,6 +100,10 @@ jobs:
           sw_vers | tee "$VCHAT_ARTIFACTS/results/environment.log"
           xcodebuild -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
           swift -version | tee -a "$VCHAT_ARTIFACTS/results/environment.log"
+      - name: Record and verify the exact source on the PR
+        run: |
+          git rev-parse HEAD | tee "$VCHAT_ARTIFACTS/results/source-commit.txt"
+          test "$(cat "$VCHAT_ARTIFACTS/results/source-commit.txt")" = "860f79835395fae0f3893bf3ac1e8ab3966a63f9"
       - name: Check the architecture verifier on this runner
         run: xcrun lipo /bin/ls -verify_arch "$(uname -m)"
       - name: Build unsigned iPhone app
