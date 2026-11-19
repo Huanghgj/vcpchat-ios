@@ -98,7 +98,7 @@ struct NativeMessageMedia: View {
             if !item.caption.isEmpty && item.preferredWidth == nil { Text(verbatim:item.caption).font(.caption).foregroundStyle(.secondary).lineLimit(nil).fixedSize(horizontal:false,vertical:true) }
             if issue != nil || video.error != nil,let url = URL(string: item.source),["https","http"].contains(url.scheme) { Link("打开原链接",destination: url).font(.caption) }
         }.frame(maxWidth: .infinity,alignment: .leading)
-            .onGeometryChange(for:Bool.self,of:{ g in
+            .onGeometryChange(for:Bool.self,of:{ [viewport] g in
                 viewport?.intersects(g.frame(in:.named("vcp-message-viewport"))) ?? true
             }) { intersectsViewport=$0 }
             .onAppear { appeared = true }.onDisappear { appeared = false; video.close() }

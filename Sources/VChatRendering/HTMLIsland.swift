@@ -433,7 +433,7 @@ struct HTMLIsland: View {
             else { Label(visible ? "等待加载视觉气泡" : "视觉气泡已暂停", systemImage: "rectangle.inset.filled").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).frame(height: controller.height) }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onGeometryChange(for: Visibility.self,of: { g in
+        .onGeometryChange(for: Visibility.self,of: { [viewport] g in
             let rect=g.frame(in:.named("vcp-message-viewport"))
             return Visibility(width:g.size.width.rounded(),onScreen:viewport?.intersects(rect) ?? true)
         }) { layout=$0 }
