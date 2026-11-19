@@ -103,8 +103,8 @@ final class PhoneInteractionTests: XCTestCase {
         try await eventually("fixture page is ready") { !web.isLoading && web.url != nil }
         let card = "<div id='vcp-root'><img id='a' src='\(redirect)'><img id='b' src='\(svg)'></div>"
         func update(_ html: String) async throws {
-            _ = try await web.callAsyncJavaScript("window.VCPBubbleStream.update(html,false,window.VCPBubbleEpoch); return true",
-                arguments: ["html": html], in: nil, contentWorld: .defaultClient)
+            try await web.runIslandScript("window.VCPBubbleStream.update(html,false,window.VCPBubbleEpoch)",
+                arguments: ["html": html])
         }
         try await update(card)
         let restored = """

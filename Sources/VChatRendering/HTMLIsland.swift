@@ -213,6 +213,17 @@ public enum HTMLIslandPolicy {
     }
 }
 
+extension WKWebView {
+    /// Xcode 16.4's Swift WebKit overlay isn't present on every supported simulator runtime.
+    @MainActor func runIslandScript(_ script: String, arguments: [String: Any]) async throws {
+        try await withCheckedThrowingContinuation { (reply: CheckedContinuation<Void, any Error>) in
+            self.__callAsyncJavaScript(script, arguments: arguments, inFrame: nil, in: .defaultClient) { _, error in
+                if let error { reply.resume(throwing: error) } else { reply.resume() }
+            }
+        }
+    }
+}
+
 enum IslandScripts {
     static let runtime: String? = load(["marked.min", "morphdom.min", "bubble-markdown", "bubble-stream"])
     static func load(_ names: [String]) -> String? {
@@ -319,13 +330,8 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
             while !Task.isCancelled,generation == own,let input = pending {
                 pending = nil
                 do {
-                    // The public refined Objective-C entry point avoids Xcode 16.4's
-                    // missing Swift WebKit overlay in older simulator runtimes.
-                    try await withCheckedThrowingContinuation { (reply: CheckedContinuation<Void,any Error>) in
-                        web.__callAsyncJavaScript("window.VCPBubbleStream.update(source,streaming,epoch)",arguments: ["source":input.source,"streaming":input.streaming,"epoch":own.uuidString],inFrame: nil,in: .defaultClient) { _,error in
-                            if let error { reply.resume(throwing: error) } else { reply.resume() }
-                        }
-                    }
+                    try await web.runIslandScript("window.VCPBubbleStream.update(source,streaming,epoch)",
+                        arguments: ["source":input.source, "streaming":input.streaming, "epoch":own.uuidString])
                 } catch {
                     if generation == own,!Task.isCancelled { failed = true; failureMessage = "气泡更新失败，重新进入可加载"; unmount() }
                     break
