@@ -58,7 +58,7 @@ struct NativeMessageMedia: View {
                 Button { viewing = true } label: { MediaImage(raster: image,animating: animations && !reduceMotion && visible && phase == .active).aspectRatio(image.width/image.height,contentMode: .fit).frame(maxWidth:imageWidth, maxHeight:340).clipShape(RoundedRectangle(cornerRadius:CGFloat(item.cornerRadius ?? 0))) }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
             } else if let issue { Label(issue,systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
             else { Label(visible ? "正在读取图片…" : "图片已暂停",systemImage: "photo").font(.caption).foregroundStyle(.secondary).frame(height: imageWidth.map { min($0, 180) } ?? 100) }
-            if !item.caption.isEmpty { Text(item.caption).font(.caption).foregroundStyle(.secondary) }
+            if !item.caption.isEmpty && item.preferredWidth == nil { Text(item.caption).font(.caption).foregroundStyle(.secondary) }
             if issue != nil || video.error != nil,let url = URL(string: item.source),["https","http"].contains(url.scheme) { Link("打开原链接",destination: url).font(.caption) }
         }.frame(maxWidth: .infinity,alignment: .leading)
             .background(GeometryReader { g in Color.clear.preference(key: MediaBounds.self,value: g.frame(in: .global)) })

@@ -192,13 +192,44 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(count, 4, "no-store content needs the network after reopening")
     }
 
+    @MainActor func testZeroMaxAgeOnlyPersistsVCPStickersWithoutRevalidationRestrictions() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let origin = ImageOriginFixture(), offline = ImageOriginFixture(), bytes = pixelPNG(.blue)
+        let online = RemoteImageStore(directory: directory) { try await origin.get($0) }
+        // All cases use valid identical images. Only URL shape and HTTP cache policy differ.
+        for (path, control, shouldPersist) in [
+            ("pw=fixture/images/测试表情包/固定.png", "public, max-age=0", true),
+            ("pw=fixture/images/photos/plain.png", "public, max-age=0", false),
+            ("images/测试表情包/无前缀.png", "public, max-age=0", false),
+            ("pw=fixture/images/测试表情包/禁止保存.png", "public, max-age=0, NO-STORE", false),
+            ("pw=fixture/images/测试表情包/必须验证.png", "public, No-Cache, max-age=0", false),
+            ("pw=fixture/images/测试表情包/必须重验.png", "public, max-age=0, must-revalidate", false)
+        ] {
+            let url = try XCTUnwrap(URL(string: "https://fixtures.invalid/" + path))
+            await origin.set(url, bytes, control: control)
+            let live = try await online.resource(url)
+            XCTAssertEqual(live.data, bytes)
+            let cold = RemoteImageStore(directory: directory) { try await offline.get($0) }
+            do {
+                let fromDisk = try await cold.resource(url)
+                XCTAssertTrue(shouldPersist, "unexpected persisted response for \(path), \(control)")
+                XCTAssertEqual(fromDisk.data, bytes)
+            } catch {
+                XCTAssertFalse(shouldPersist, "valid VCP sticker was unavailable offline: \(error.localizedDescription)")
+            }
+            let networkAttempts = await offline.count(url)
+            XCTAssertEqual(networkAttempts, shouldPersist ? 0 : 1, "wrong cold-load policy: \(path), \(control)")
+        }
+    }
+
     @MainActor func testStickerCatalogRepairsOnlyStickerNamesAndPackages() throws {
         let library = EmoticonCatalog(entries: ["猫表情包": ["开心.webp", "吃鱼.png"], "兔表情包": ["开心.gif"]])
         func source(_ package: String, _ filename: String) throws -> URL {
-            try XCTUnwrap(URL(string: "https://fixtures.invalid:8443/pw=fixture/images/")
-                ?.appendingPathComponent(package)
+            let base = try XCTUnwrap(URL(string: "https://fixtures.invalid:8443/pw=fixture/images/"))
+            return base.appendingPathComponent(package)
                 .appendingPathComponent(filename)
-                .appending(queryItems: [URLQueryItem(name: "revision", value: "abc")]))
+                .appending(queryItems: [URLQueryItem(name: "revision", value: "abc")])
         }
         let missingExtension = try source("猫表情包", "开心.jpg")
         let expected = try source("猫表情包", "开心.webp")

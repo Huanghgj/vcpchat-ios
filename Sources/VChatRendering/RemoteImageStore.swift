@@ -58,7 +58,7 @@ actor RemoteImageStore {
             try Task.checkCancellation()
             guard reply.status == 200 else { throw ClientError.http(reply.status) }
             guard let mime = Self.imageType(reply.data) else { throw ClientError.server("响应不是可显示的图片") }
-            let expires = Date().addingTimeInterval(Self.lifetime(reply.cacheControl))
+            let expires = Date().addingTimeInterval(Self.lifetime(reply.cacheControl, url:canonical))
             let value = CachedRemoteImage(data: reply.data, mime: mime, expires: expires)
             if own == generation && expires > Date() { write(value, file: file) }
             return value
@@ -81,7 +81,7 @@ actor RemoteImageStore {
         return mime
     }
 
-    private static func lifetime(_ control: String) -> TimeInterval {
+    private static func lifetime(_ control: String, url:URL) -> TimeInterval {
         let directives = control.lowercased().split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         let names = directives.map { $0.components(separatedBy: "=")[0].trimmingCharacters(in: .whitespaces) }
         if names.contains("no-store") || names.contains("no-cache") { return 0 }
@@ -89,6 +89,15 @@ actor RemoteImageStore {
         if let index = names.firstIndex(of: "max-age") {
             let parts = directives[index].components(separatedBy: "=")
             guard parts.count == 2, let age = Int(parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \""))) else { return 0 }
+            // VCP ImageFileServer uses Express' default "public, max-age=0".
+            // A named sticker is an offline conversation asset, not a live HTTP
+            // preview. Scope this snapshot policy to unsigned-query VCP library URLs;
+            // explicit privacy/revalidation rules and ordinary URLs keep HTTP behavior.
+            let path=url.pathComponents
+            if age==0, names.contains("public"), !names.contains("private"),
+               !names.contains("must-revalidate"), !names.contains("proxy-revalidate"), url.query == nil,
+               path.count==5, path[1].hasPrefix("pw="), path[1].count>3, path[2]=="images",
+               EmoticonCatalog.pair(url) != nil { return maximum }
             return min(maximum, max(0, Double(age)))
         }
         return maximum
