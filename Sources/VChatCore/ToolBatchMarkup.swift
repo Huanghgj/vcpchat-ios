@@ -24,7 +24,25 @@ enum ToolBatchMarkup {
         return raw
     }
 
-    static func split(_ raw: String, streaming: Bool) -> [Domain] {
+    /// Keep the source ranges (including both role markers and the timestamp) intact
+    /// for display filters. The matcher is the same one used to render the receipt.
+    static func mapProse(_ raw: String, transform: (String) -> String) -> String {
+        guard raw.contains("<<<[VCP_TOOL_BATCH_") else { return transform(raw) }
+        var protected: [NSRange] = []
+        _ = split(raw, streaming:false) { protected.append($0) }
+        guard !protected.isEmpty else { return transform(raw) }
+        let text=raw as NSString
+        var result="", cursor=0
+        for range in protected {
+            if range.location > cursor { result += transform(text.substring(with:NSRange(location:cursor,length:range.location-cursor))) }
+            result += text.substring(with:range)
+            cursor=NSMaxRange(range)
+        }
+        if cursor<text.length { result += transform(text.substring(from:cursor)) }
+        return result
+    }
+
+    static func split(_ raw: String, streaming: Bool, protected: ((NSRange) -> Void)? = nil) -> [Domain] {
         guard raw.contains("<<<[VCP_TOOL_BATCH_") || (streaming && raw.contains("<<<[")) else { return [.prose(raw)] }
         let text = raw as NSString
         var domains: [Domain] = [], pos = 0, plain = 0, literalTail = false
@@ -40,6 +58,7 @@ enum ToolBatchMarkup {
                 let id = text.substring(with:m.range(at:5))
                 var before = text.substring(with:NSRange(location:plain,length:m.range.location-plain))
                 if !isStart { // An orphan footer must not consume the text after it.
+                    protected?(m.range)
                     if !before.isEmpty { domains.append(.prose(before)) }
                     plain=pos;continue
                 }
@@ -50,11 +69,13 @@ enum ToolBatchMarkup {
                     let closing = closingShell.firstMatch(in:raw, options:.anchored, range:remaining(after))
                     if let closing, closing.range.location==after {
                         before=(before as NSString).substring(to:shell.range.location);after=NSMaxRange(closing.range)
-                    } else if streaming && (!closed || trimPending(text.substring(from:after),streaming:true).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) {
+                    } else if !closed || (streaming && trimPending(text.substring(from:after),streaming:true).trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) {
                         before=(before as NSString).substring(to:shell.range.location)
                     }
                 }
                 if !before.isEmpty { domains.append(.prose(before)) }
+                let start=plain + before.utf16.count
+                protected?(NSRange(location:start,length:after-start))
                 let body=text.substring(with:NSRange(location:pos,length:(closed ? finish.location : text.length)-pos))
                 domains.append(.receipt(trimPending(body, streaming:streaming && !closed),closed:closed))
                 pos=after;plain=after;continue

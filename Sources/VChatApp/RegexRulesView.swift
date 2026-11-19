@@ -79,7 +79,7 @@ private struct RegexRuleEditor: View {
                     Picker("位置", selection: $previewScope) { Text("显示").tag("frontend"); Text("上下文").tag("context") }
                     Picker("角色", selection: $previewRole) { Text("用户").tag("user"); Text("助手").tag("assistant") }
                     TextEditor(text: $sample).frame(minHeight: 75)
-                    Button("预览替换") { Task { do { output = try await RegexEngine.shared.apply(sample, rules: [rule], scope: previewScope, role: previewRole); error = nil } catch { self.error = error.localizedDescription } } }.disabled(rule.findPattern.isEmpty)
+                    Button("预览替换") { Task { do { try await RegexEngine.shared.validate(rule.findPattern); output = try await RegexEngine.shared.apply(sample, rules: [rule], scope: previewScope, role: previewRole); error = nil } catch { self.error = error.localizedDescription } } }.disabled(rule.findPattern.isEmpty)
                     if !output.isEmpty { Text(verbatim: output).textSelection(.enabled) }
                 }
                 if existing { Section { Button("删除规则", role: .destructive) { deleting = true } } }

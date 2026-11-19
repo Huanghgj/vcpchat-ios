@@ -47,73 +47,79 @@ public enum HTMLIslandPolicy {
         return false
     }
     public static func containsIsland(_ source: String) -> Bool {
-        guard source.localizedCaseInsensitiveContains("<div") else { return false }
-        let sections = extractSections(from: source)
-        return sections.contains { if case .island = $0 { return true }; return false }
+        extractSections(from:source).contains { if case .island = $0 { return true }; return false }
     }
 
-    /// Extract mixed markdown and embedded HTML visual islands from prose.
-    public static func extractSections(from source: String) -> [IslandSection] {
-        guard source.localizedCaseInsensitiveContains("<div") else { return [.markdown(source)] }
-        let s = source as NSString
-        let literalRanges = (codeFences(source) + opaqueDomains.matches(in:source,range:NSRange(location:0,length:s.length)).map(\.range)).sorted { $0.location < $1.location }
-        var literalIndex = 0
-        let matches = openingDiv.matches(in:source,range:NSRange(location:0,length:s.length))
-        var sections: [IslandSection] = []
-        var cursor = 0
-        for m in matches {
-            let divStart = m.range.location
-            if divStart < cursor { continue }
-            if divStart > 0, s.character(at:divStart-1) == 92 { continue }
-            var precedingSpace=divStart
-            while precedingSpace > 0, [9,32].contains(s.character(at:precedingSpace-1)) { precedingSpace -= 1 }
-            if precedingSpace == 0 || s.character(at:precedingSpace-1) == 10 {
-                let indentation=s.substring(with:NSRange(location:precedingSpace,length:divStart-precedingSpace))
-                if indentation.contains("\t") || indentation.count >= 4 { continue }
-            }
-            // Skip root divs inside code fences
-            while literalIndex < literalRanges.count, NSMaxRange(literalRanges[literalIndex]) <= divStart { literalIndex += 1 }
-            if literalIndex < literalRanges.count, NSLocationInRange(divStart,literalRanges[literalIndex]) { continue }
-            let opening=s.substring(with:m.range)
-            let explicit=accepts(opening)
-            let startOfLine = divStart==0 || s.character(at:divStart-1)==10
-            guard explicit || startOfLine else { continue }
+    // Tokenize complete tags (including unrelated tags) so markup-looking strings
+    // inside quoted attributes, comments and raw-text elements cannot open a card.
+    private static let tagTokens = try! NSRegularExpression(pattern: #"(?is)<!--.*?(?:-->|$)|<(script|style|pre|code|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>.*?(?:</\1\s*>|$)|(`+)(?!`).*?\2(?!`)|<(/?)([a-z][a-z0-9:-]*)(?=[\s/>])(?:"[^"]*"|'[^']*'|[^'">])*>"#)
+    private static let possibleRoot = try! NSRegularExpression(pattern: #"(?i)<(?:div|details|section|article|aside|figure|span|p|table|ul|ol|blockquote)(?=[\s>])"#)
+    private static let styledDiv = try! NSRegularExpression(pattern: #"(?i)^<div(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*?\s+(?:style|class)\s*="#)
+    private static let blockRoots: Set<String> = ["div","details","section","article","aside","figure"]
+    private static let regexRoots: Set<String> = ["div","details","section","article","aside","figure","span","p","table","ul","ol","blockquote"]
+    private struct Container { let tag: String; let opening: NSRange; var end: Int? }
 
-            // Pull in preceding <style>...</style> if tightly attached
-            let islandStart = findStylePrefix(in: s, after: cursor, before: divStart)
-
-            // Balance <div> depth starting from after this root div opening tag
-            let divOpenEnd = NSMaxRange(m.range)
-            let divEnd = balanceDiv(in: s, from: divOpenEnd)
-            let islandEnd = attachedScriptsEnd(in: s, from: divEnd)
-            if !explicit {
-                guard islandEnd-divStart <= 256*1024 else { continue }
-                let card=s.substring(with:NSRange(location: divStart,length:islandEnd-divStart))
-                guard card.utf8.count<=256*1024,
-                      card.range(of:#"(?i)<(?:canvas|script|style|img|svg)\b"#,options:.regularExpression) != nil else { continue }
-            }
-
-            let preceding = s.substring(with: NSRange(location: cursor, length: islandStart - cursor))
-            if !preceding.isEmpty {
-                sections.append(.markdown(preceding))
-            }
-
-            let islandHtml = s.substring(with: NSRange(location: islandStart, length: islandEnd - islandStart))
-            sections.append(.island(islandHtml))
-            cursor = islandEnd
-        }
-
-        if cursor < s.length {
-            let trailing = s.substring(from: cursor)
-            if !trailing.isEmpty {
-                sections.append(.markdown(trailing))
+    /// Paired fragments become their own WebKit document; neighboring prose and
+    /// standalone images still go through the native Markdown/media renderer.
+    public static func extractSections(from source: String, regexOutput: Bool = false, streaming: Bool = false) -> [IslandSection] {
+        let s=source as NSString
+        guard source.contains("<"), possibleRoot.firstMatch(in:source,range:NSRange(location:0,length:s.length)) != nil else { return [.markdown(source)] }
+        let fences=codeFences(source), roots=regexOutput ? regexRoots : blockRoots
+        var fence=0, candidates:[Container]=[], stacks:[String:[Int]]=[:]
+        // Scan gaps independently: triple-backtick code must never absorb HTML after the fence.
+        func scan(_ range:NSRange) {
+            guard range.length>0 else { return }
+            for m in tagTokens.matches(in:source,range:range) {
+                guard m.range(at:4).location != NSNotFound else { continue }
+                let tag=s.substring(with:m.range(at:4)).lowercased()
+                guard roots.contains(tag) else { continue }
+                if m.range.location>0 && s.character(at:m.range.location-1)==92 { continue }
+                if m.range(at:3).length>0 {
+                    guard let index=stacks[tag]?.popLast() else { continue }
+                    candidates[index].end=NSMaxRange(m.range)
+                } else {
+                    stacks[tag,default:[]].append(candidates.count)
+                    candidates.append(Container(tag:tag,opening:m.range,end:nil))
+                }
             }
         }
-        return sections.isEmpty ? [.markdown(source)] : sections
+        for range in fences {
+            scan(NSRange(location:fence,length:range.location-fence))
+            fence=NSMaxRange(range)
+        }
+        scan(NSRange(location:fence,length:s.length-fence))
+
+        var sections:[IslandSection]=[], cursor=0
+        for card in candidates where card.opening.location >= cursor {
+            let at=card.opening.location
+            var line=at
+            while line>0 && (s.character(at:line-1)==9 || s.character(at:line-1)==32) { line -= 1 }
+            let lineStart=line==0 || s.character(at:line-1)==10
+            if lineStart && (at-line >= 4 || s.substring(with:NSRange(location:line,length:at-line)).contains("\t")) { continue }
+            let opening=s.substring(with:card.opening)
+            let explicit=card.tag=="div" && accepts(opening)
+            // Plain regex wrappers are accepted only when balanced. Legacy explicit
+            // roots and streaming visual DIVs may still be presented progressively.
+            let end=card.end ?? s.length
+            guard explicit || end-at <= 256*1024 else { continue }
+            let body=s.substring(with:NSRange(location:at,length:end-at))
+            let visual=card.tag=="div" && lineStart &&
+                body.range(of:#"(?i)<(?:canvas|script|style|img|svg)\b"#,options:.regularExpression) != nil
+            let start=findStylePrefix(in:s,after:cursor,before:at)
+            let hasStyle = card.tag == "div" && opening.utf8.count <= 8192 && styledDiv.firstMatch(in:opening,range:NSRange(location:0,length:opening.utf16.count)) != nil
+            let semantic = card.tag != "div" || start < at || hasStyle
+            guard explicit || (visual && (streaming || card.end != nil))
+                || (card.end != nil && (regexOutput || semantic)) else { continue }
+            let last=attachedScriptsEnd(in:s,from:end)
+            if start>cursor { sections.append(.markdown(s.substring(with:NSRange(location:cursor,length:start-cursor)))) }
+            sections.append(.island(s.substring(with:NSRange(location:start,length:last-start))))
+            cursor=last
+        }
+        if sections.isEmpty { return [.markdown(source)] }
+        if cursor<s.length { sections.append(.markdown(s.substring(from:cursor))) }
+        return sections
     }
 
-    private static let opaqueDomains = try! NSRegularExpression(pattern: #"(?is)<!--.*?(?:-->|$)|<(script|style|code|pre|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>.*?(?:</\1\s*>|$)|(`+)(?!`).*?\2(?!`)"#)
-    private static let openingDiv = try! NSRegularExpression(pattern: #"(?i)<div\b(?:"[^"]*"|'[^']*'|[^'">])*>"#)
     static func codeFences(_ source: String) -> [NSRange] {
         var ranges: [NSRange] = []; var opened: (Int, String, Int)?; var offset = 0
         let s = source as NSString
@@ -141,7 +147,10 @@ public enum HTMLIslandPolicy {
     }
 
     private static func findStylePrefix(in s: NSString, after lowerBound: Int, before divIndex: Int) -> Int {
-        guard lowerBound < divIndex,
+        guard lowerBound < divIndex else { return divIndex }
+        var last=divIndex
+        while last>lowerBound, let scalar=UnicodeScalar(s.character(at:last-1)), CharacterSet.whitespacesAndNewlines.contains(scalar) { last -= 1 }
+        guard last-lowerBound>=8, s.substring(with:NSRange(location:last-8,length:8)).lowercased()=="</style>",
               let regex = try? NSRegularExpression(pattern: #"(?is)<style\b[^>]*>.*?</style\s*>"#) else { return divIndex }
         let searchRange = NSRange(location: lowerBound, length: divIndex - lowerBound)
         var cursor = divIndex
@@ -152,28 +161,6 @@ public enum HTMLIslandPolicy {
             cursor = match.range.location
         }
         return cursor
-    }
-
-    private static func balanceDiv(in s: NSString, from start: Int) -> Int {
-        let tagPattern = #"(?is)<!--[\s\S]*?(?:-->|$)|<(script|style|pre|code|textarea)\b(?:"[^"]*"|'[^']*'|[^'">])*>[\s\S]*?(?:</\1\s*>|$)|<(/?)([a-z][a-z0-9:-]*)(?:"[^"]*"|'[^']*'|[^'">])*>"#
-        guard let regex = try? NSRegularExpression(pattern: tagPattern) else { return s.length }
-        var depth = 1
-        var cursor = start
-        while cursor < s.length {
-            guard let m = regex.firstMatch(in: s as String, range: NSRange(location: cursor, length: s.length - cursor)) else { break }
-            let matchedTag = s.substring(with: m.range)
-            cursor = NSMaxRange(m.range)
-            // Skip comments and raw containers
-            if matchedTag.hasPrefix("<!--") || m.range(at: 1).location != NSNotFound { continue }
-            guard m.range(at: 3).location != NSNotFound else { continue }
-            let tagName = s.substring(with: m.range(at: 3)).lowercased()
-            if tagName == "div" {
-                let isClosing = m.range(at: 2).location != NSNotFound && s.substring(with: m.range(at: 2)) == "/"
-                depth += isClosing ? -1 : 1
-                if depth <= 0 { return cursor }
-            }
-        }
-        return s.length
     }
 
     private static let trailingScript = try! NSRegularExpression(
@@ -195,7 +182,7 @@ public enum HTMLIslandPolicy {
         let emphasis = emphasisColor ?? (dark ? "#88d6b0" : "#278752")
         let noMotion = motion ? "" : "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}"
         return """
-        <!doctype html><html data-vcp-host-theme="\(color)"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(media ? "https: data:" : "'none'"); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}img.vcp-standalone-photo{display:block;width:100%!important;height:auto!important;max-height:720px;object-fit:contain}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
+        <!doctype html><html data-vcp-host-theme="\(color)"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(media ? "https: data:" : "'none'"); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}body{display:flow-root}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}img.vcp-standalone-photo{display:block;width:100%!important;height:auto!important;max-height:720px;object-fit:contain}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
         """
     }
 }
