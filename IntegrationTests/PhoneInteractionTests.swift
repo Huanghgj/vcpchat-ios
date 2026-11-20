@@ -1587,7 +1587,7 @@ extension PhoneInteractionTests {
             apiKey: "fixture", messages: [.init(role: "user", content: "test")], contextTokenLimit: 100, maxOutputTokens: 12)
         let job = BackgroundReplyJob(messageID: answer.id, topicID: topic.id, userID: user.id)
         let ticket = try await model.replyTransfers.submit(job, request: request, room: room, store: db)
-        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ticket.directory.appendingPathComponent("post"))) as? [String: Any])
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.urlRequest(streaming:true).httpBody)) as? [String: Any])
         XCTAssertEqual(payload["stream"] as? Bool, true); XCTAssertEqual(payload["contextTokenLimit"] as? Int, 100)
         XCTAssertEqual(payload["max_tokens"] as? Int, 12)
         await model.interruptForBackground()
@@ -1611,9 +1611,7 @@ extension PhoneInteractionTests {
         let answer = StoredMessage(topicID:"fixture", role:"assistant", content:"前缀",status:"connecting")
         try await db.save(answer)
         let model = ChatViewModel(), room = ChatRoom(id:"fixture",messages:[answer])
-        let config = URLSessionConfiguration.background(withIdentifier:"vchat.integration.stream." + UUID().uuidString)
-        config.isDiscretionary = false
-        model.replyTransfers = BackgroundReplyTransfers(configuration:config)
+        model.replyTransfers = BackgroundReplyTransfers()
         model.store = db; model.rooms[room.id] = room; room.receivesInBackground = true; room.busy = true
         try await model.restoreBackgroundReplies(store:db, root:root)
         let job = BackgroundReplyJob(messageID:answer.id,topicID:room.id,userID:nil)

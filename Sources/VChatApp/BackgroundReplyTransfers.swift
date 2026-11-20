@@ -3,12 +3,20 @@ import Foundation
 import UIKit
 import VChatCore
 
-/// The daemon owns the POST from the outset; switching apps never replays a chat or a tool call.
+/// Keep the same live data task across scene changes. A background upload task
+/// buffers the response body and cannot be used for incremental SSE presentation.
 @MainActor final class BackgroundReplyTransfers: NSObject, @preconcurrency URLSessionDataDelegate {
     static let identifier = "vchat.background-replies.v1"
+    private let reconnectLegacy: Bool
     private let configuration: URLSessionConfiguration
     init(configuration: URLSessionConfiguration? = nil) {
-        self.configuration = configuration ?? Self.backgroundConfiguration()
+        reconnectLegacy = configuration == nil
+        self.configuration = configuration ?? .ephemeral
+        self.configuration.timeoutIntervalForRequest = 600
+        self.configuration.timeoutIntervalForResource = 600
+        self.configuration.shouldUseExtendedBackgroundIdleMode = true
+        self.configuration.httpShouldSetCookies = false
+        self.configuration.urlCache = nil
         super.init()
     }
     private static func backgroundConfiguration() -> URLSessionConfiguration {
@@ -23,6 +31,8 @@ import VChatCore
     }
     private lazy var session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
 
+    // Reconnect to build 18's existing system jobs without ever resubmitting them.
+    private lazy var legacySession = URLSession(configuration: Self.backgroundConfiguration(), delegate: self, delegateQueue: .main)
     struct Receipt: Codable, Sendable {
         var error: String?
         var stopped = false
@@ -47,6 +57,7 @@ import VChatCore
 
     func handleWake(_ completion: @escaping () -> Void) {
         self.completion = completion
+        if root != nil && reconnectLegacy { _ = legacySession }
         finishWakeIfReady()
     }
     func abandonWake() {
@@ -80,7 +91,7 @@ import VChatCore
         self.root = root
         for id in ids { _ = makeTicket(id, root: root) }
         let restored = tickets
-        let running = await session.allTasks
+        let running = (!reconnectLegacy || (jobs.isEmpty && completion == nil)) ? [] : await legacySession.allTasks
         for task in running {
             guard let id = task.taskDescription, ids.contains(id) else { task.cancel(); continue }
             guard task.state != .suspended else { task.cancel(); continue }
@@ -105,12 +116,9 @@ import VChatCore
         return ticket
     }
     nonisolated private static func prepare(_ request: ChatRequest, directory: URL) async throws -> URLRequest {
-        var call = try request.urlRequest(streaming: true)
+        let call = try request.urlRequest(streaming: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        guard let body = call.httpBody else { throw ClientError.invalidConfiguration }
-        try body.write(to: directory.appendingPathComponent("post"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        call.httpBody = nil
         return call
     }
     func submit(_ job: BackgroundReplyJob, request: ChatRequest, room: ChatRoom, store: ChatStore) async throws -> Ticket {
@@ -120,8 +128,11 @@ import VChatCore
         room.backgroundJobID = job.id
         do {
             let call = try await Self.prepare(request, directory: ticket.directory)
-            if room.cancelled { deliver(Receipt(stopped: true), for: job.id); return ticket }
-            let task = session.uploadTask(with: call, fromFile: ticket.directory.appendingPathComponent("post"))
+            if room.cancelled {
+                if room.cancellation == .interrupted { interrupt(job.id) } else { cancel(job.id) }
+                return ticket
+            }
+            let task = session.dataTask(with: call)
             task.prefersIncrementalDelivery = true
             task.taskDescription = job.id; tasks[job.id] = task
             task.resume()
@@ -129,6 +140,10 @@ import VChatCore
             deliver(Receipt(error: error.localizedDescription), for: job.id)
         }
         return ticket
+    }
+    func interrupt(_ id: String) {
+        tasks[id]?.cancel()
+        deliver(Receipt(error: "系统已结束后台运行，已收到的内容已保留。"), for: id)
     }
     func cancel(_ id: String) {
         tasks[id]?.cancel()
@@ -257,10 +272,11 @@ extension ChatViewModel {
             room.backgroundJobID = nil; room.receivedReplyBytes = 0
             replyTransfers.acknowledge(job.id, committed: committed)
         }
+        defer { ReplyRuntime.finish(job.id, success: room.messages.first { $0.id == job.messageID }?.status == "complete") }
         let reader = ReplyStreamReader(ticket.directory)
         let message = room.messages.first { $0.id == job.messageID }
         let prefix = message?.text ?? "", reasoningPrefix = message?.reasoning ?? ""
-        var nextIslandUpdate: ContinuousClock.Instant?
+        var nextIslandUpdate: ContinuousClock.Instant?, nextBackgroundUpdate: ContinuousClock.Instant?
         for await event in ticket.events {
             switch event {
             case .bytesAvailable:
@@ -270,13 +286,15 @@ extension ChatViewModel {
                     message?.status = "streaming"; room.connection = "正在回复"; room.frames += 1
                     let bytes = live.text.utf8.count + live.reasoning.utf8.count
                     room.receivedReplyBytes = bytes
-                    if backgrounded {
-                        let now = ContinuousClock.now
-                        if nextIslandUpdate.map({ now >= $0 }) ?? true {
-                            nextIslandUpdate = now + .seconds(2)
-                            await updateReplyActivity(job.id, bytes)
-                        }
-                    } else { nextIslandUpdate = nil }
+                    let now = ContinuousClock.now
+                    if nextIslandUpdate.map({ now >= $0 }) ?? true {
+                        nextIslandUpdate = now + .seconds(1)
+                        ReplyRuntime.progress(job.id, bytes: bytes)
+                    }
+                    if backgrounded, nextBackgroundUpdate.map({ now >= $0 }) ?? true {
+                        nextBackgroundUpdate = now + .seconds(2)
+                        await updateReplyActivity(job.id, bytes)
+                    } else if !backgrounded { nextBackgroundUpdate = nil }
                     // Only the newest signal matters; the spool retains every chunk.
                     try? await Task.sleep(for: .milliseconds(backgrounded ? 100 : 16))
                 }

@@ -523,10 +523,24 @@ struct TopicDraft: Codable, Sendable {
     func detach(_ id: String) async {
         room?.attachments.removeAll { $0.id == id }; await flushDraft()
     }
+    private func reserveReply(in room: ChatRoom) {
+        let id = UUID().uuidString
+        room.backgroundJobID = id
+        #if os(iOS)
+        // Only a send/regenerate gesture creates a new generation. An expiring
+        // system task must never restart the model or execute its tools again.
+        ReplyRuntime.begin(id) { [weak self, weak room] in
+            guard let self, let room, room.backgroundJobID == id else { return }
+            room.cancellation = .interrupted
+            self.replyTransfers.interrupt(id)
+        }
+        #endif
+    }
     private func clearUnsubmittedJob(in room: ChatRoom) {
         #if os(iOS)
         if let id = room.backgroundJobID {
             room.backgroundJobID = nil
+            ReplyRuntime.finish(id, success:false)
             let phase: ReplyActivityAttributes.ContentState.Phase = room.cancelled ? .stopped : .interrupted
             Task { await ReplyPresentation.end(id, phase: phase) }
         }
@@ -542,7 +556,7 @@ struct TopicDraft: Codable, Sendable {
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
-        if room.receivesInBackground && !speakers.isEmpty { room.backgroundJobID = UUID().uuidString }
+        if room.receivesInBackground && !speakers.isEmpty { reserveReply(in:room) }
         room.generation = Task {
             var currentReply: MessageViewModel?
             do {
@@ -596,7 +610,8 @@ struct TopicDraft: Codable, Sendable {
         }
         #if os(iOS)
         if room.receivesInBackground {
-            let job = BackgroundReplyJob(id: room.backgroundJobID ?? UUID().uuidString, messageID: assistant.id, topicID: room.id, userID: acceptedUser)
+            if room.backgroundJobID == nil { reserveReply(in:room) }
+            let job = BackgroundReplyJob(id: room.backgroundJobID!, messageID: assistant.id, topicID: room.id, userID: acceptedUser)
             room.connection = "正在接收回复"
             let ticket = try await replyTransfers.submit(job, request: request, room: room, store: store)
             await collectBackgroundReply(job, ticket: ticket, room: room, store: store)
@@ -626,7 +641,7 @@ struct TopicDraft: Codable, Sendable {
         let prefix = continuing ? message.text : "", reasoning = continuing ? message.reasoning : ""
         let history = (continuing ? room.messages : Array(room.messages.dropLast())).map(\.record)
         room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
-        if room.receivesInBackground { room.backgroundJobID = UUID().uuidString }
+        if room.receivesInBackground { reserveReply(in:room) }
         room.generation = Task {
             defer { clearUnsubmittedJob(in: room); room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
             do {

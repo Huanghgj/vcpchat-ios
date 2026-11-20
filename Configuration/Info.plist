@@ -11,7 +11,11 @@
 <key>NSSupportsLiveActivities</key><true/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLSchemes</key><array><string>vchat</string></array></dict></array>
 <key>LSRequiresIPhoneOS</key><true/>
-<key>UIBackgroundModes</key><array><string>audio</string></array>
+<key>UIBackgroundModes</key><array><string>audio</string><string>processing</string></array>
+<key>BGTaskSchedulerPermittedIdentifiers</key><array>
+<string>$(PRODUCT_BUNDLE_IDENTIFIER).reply.0</string><string>$(PRODUCT_BUNDLE_IDENTIFIER).reply.1</string>
+<string>$(PRODUCT_BUNDLE_IDENTIFIER).reply.2</string><string>$(PRODUCT_BUNDLE_IDENTIFIER).reply.3</string>
+</array>
 <key>UILaunchScreen</key><dict/>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 <key>NSLocationWhenInUseUsageDescription</key><string>允许后，向你选定的 Agent 提供发送消息时的位置，用于附近地点与出行建议。不会在后台持续追踪。</string>

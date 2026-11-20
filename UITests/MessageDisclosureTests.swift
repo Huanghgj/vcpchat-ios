@@ -71,8 +71,9 @@ final class MessageDisclosureTests: XCTestCase {
         app.launchArguments = ["-native.background-replies", "YES"]
         app.launch()
         let send = app.buttons["发送消息"]
-        XCTAssertTrue(send.waitForExistence(timeout:20)); send.tap()
-        XCTAssertTrue(app.staticTexts["首段"].waitForExistence(timeout:20))
+        guard send.waitForExistence(timeout:20) else { XCTFail("Chat did not open"); return }
+        send.tap()
+        guard app.staticTexts["首段"].waitForExistence(timeout:20) else { XCTFail("First chunk was not visible before completion"); return }
         XCUIDevice.shared.press(.home)
         XCTAssertNotEqual(app.state,.runningForeground)
         _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
@@ -80,7 +81,7 @@ final class MessageDisclosureTests: XCTestCase {
         // complete until after the partial reply is visible again.
         try await Task.sleep(for:.seconds(32))
         app.activate()
-        XCTAssertTrue(app.staticTexts["首段补齐"].waitForExistence(timeout:20))
+        guard app.staticTexts["首段补齐"].waitForExistence(timeout:20) else { XCTFail("Missing background chunk before completion"); return }
         XCTAssertTrue(app.buttons["停止生成"].exists)
         let (body,_) = try await URLSession.shared.data(from:url.appendingPathComponent("finish"))
         XCTAssertEqual(String(decoding:body,as:UTF8.self),"1")
