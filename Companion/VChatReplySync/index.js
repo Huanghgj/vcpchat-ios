@@ -149,6 +149,7 @@ function createService({ directory, port, key, ttl = TTL }) {
           const heartbeat = setInterval(()=>{ if(!res.destroyed) res.write('\n'); },10000);
           try {
             while (job.meta.state === 'running' && !res.destroyed) await wait(job,res,10000);
+            clearInterval(heartbeat); // no more whitespace once the JSON string begins
             if (!res.destroyed) {
               const packet = {id,state:job.meta.state,reason:job.meta.reason||null,offset:0,next:job.size};
               res.write(JSON.stringify(packet).slice(0,-1)+',"data":"');
