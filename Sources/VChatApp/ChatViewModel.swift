@@ -100,7 +100,7 @@ struct TopicDraft: Codable, Sendable {
     var stickerOrigin: URL?
     var currentImageOrigin: URL? { StickerDirectories.origin(try? configuration.baseURL()) }
     var stickers: StickerContext {
-        StickerContext(server: currentImageOrigin, fileKey: serviceSecrets[.fileKey] ?? "",
+        StickerContext(server: currentImageOrigin, fileKey: currentImageOrigin == savedImageOrigin ? (serviceSecrets[.fileKey] ?? "") : "",
                        catalog: stickerOrigin == currentImageOrigin ? stickerCatalog : nil)
     }
     var appearance = AppearanceSettings()

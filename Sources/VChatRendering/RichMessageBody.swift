@@ -99,6 +99,7 @@ public struct RichMessageBody: View {
     @Environment(\.messageLayoutMemory) private var memory
     @Environment(\.renderedMessageID) private var messageID
     private var parsedKey:String { transcriptRow ? messageID : "" }
+    @Environment(\.parentIsland) private var parentIsland
     private var transcriptRow: Bool
     private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:rules.isEmpty ? 0 : depth) }
     @State private var rendering = RenderState()
@@ -119,7 +120,7 @@ public struct RichMessageBody: View {
             else if rendering.hasRendered || !rendering.blocks.isEmpty || saved != nil {
                 NativeBlocks(blocks: rendering.hasRendered ? rendering.blocks : (saved?.blocks ?? rendering.blocks),
                              options: options, streaming: rendering.hasRendered && rendering.streaming,
-                             transcriptID: transcriptRow ? messageID : nil).equatable()
+                             transcriptID: transcriptRow ? messageID : nil, parentIsland: parentIsland).equatable()
             } else { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
         }
         // A self-sizing chat row may initially propose just one line while a sticker
@@ -145,8 +146,7 @@ private struct NativeBlocks: View, Equatable {
     var options: RenderOptions
     var streaming = false
     var transcriptID: String?
-    @Environment(\.parentIsland) private var parentIsland
-    static func == (lhs:Self, rhs:Self) -> Bool { lhs.blocks == rhs.blocks && lhs.options == rhs.options && lhs.streaming == rhs.streaming && lhs.transcriptID == rhs.transcriptID }
+    var parentIsland: IslandSlot?
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in blockView(block, index: index) }
@@ -161,9 +161,9 @@ private struct NativeBlocks: View, Equatable {
         case .literal(let text): Text(verbatim: text).modifier(MessageTextSelection())
         case .paragraph(let runs): InlineBody(runs: runs,animations: options.motion)
         case .heading(let level, let text): InlineBody(runs: text,animations: options.motion).font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming).environment(\.parentIsland,slot).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
+        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming,parentIsland:slot).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
         case .list(let items, let start):
-            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming).environment(\.parentIsland,slot?.child(String(index))) } } }
+            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming,parentIsland:slot?.child(String(index))) } } }
         case .rule: Divider()
         case .math(let source): ScrollView(.horizontal) { NativeMath(source).fixedSize().padding(.vertical, 3) }
         case .code(let language, let code, let spans): NativeCode(language: language, source: code, spans: spans)
