@@ -269,10 +269,10 @@ extension ChatViewModel {
     func collectBackgroundReply(_ job: BackgroundReplyJob, ticket: BackgroundReplyTransfers.Ticket, room: ChatRoom, store: ChatStore) async {
         var committed = false
         defer {
+            room.finishedSpeakerBytes += room.receivedReplyBytes
             room.backgroundJobID = nil; room.receivedReplyBytes = 0
             replyTransfers.acknowledge(job.id, committed: committed)
         }
-        defer { ReplyRuntime.finish(job.id, success: room.messages.first { $0.id == job.messageID }?.status == "complete") }
         let reader = ReplyStreamReader(ticket.directory)
         let message = room.messages.first { $0.id == job.messageID }
         let prefix = message?.text ?? "", reasoningPrefix = message?.reasoning ?? ""
@@ -289,7 +289,7 @@ extension ChatViewModel {
                     let now = ContinuousClock.now
                     if nextIslandUpdate.map({ now >= $0 }) ?? true {
                         nextIslandUpdate = now + .seconds(1)
-                        ReplyRuntime.progress(job.id, bytes: bytes)
+                        if let turn = room.replyRuntimeID { ReplyRuntime.progress(turn,bytes:room.finishedSpeakerBytes + bytes) }
                     }
                     if backgrounded, nextBackgroundUpdate.map({ now >= $0 }) ?? true {
                         nextBackgroundUpdate = now + .seconds(2)

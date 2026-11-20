@@ -10,7 +10,7 @@ env:
 jobs:
   native:
     if: github.event_name == 'pull_request'
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
@@ -102,7 +102,7 @@ jobs:
   device:
     name: Package iPhone release
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1

@@ -7,6 +7,7 @@ import VChatCore
 
 /// iOS 26 can keep an explicitly user-started streaming connection executing.
 @MainActor enum ReplyRuntime {
+    static let noticeKey = "native.last-reply-runtime-notice"
     #if compiler(>=6.2)
     @available(iOS 26.0, *)
     @MainActor private final class Slot {
@@ -57,7 +58,13 @@ import VChatCore
             let request = BGContinuedProcessingTaskRequest(identifier:slot.identifier,title:"VChat 正在回复",subtitle:"等待服务器输出")
             request.strategy = .fail
             slot.job = id; slot.expire = expire
-            do { try BGTaskScheduler.shared.submit(request) } catch { slot.job = nil; slot.expire = nil }
+            do {
+                try BGTaskScheduler.shared.submit(request)
+                UserDefaults.standard.removeObject(forKey: noticeKey)
+            } catch {
+                slot.job = nil; slot.expire = nil
+                UserDefaults.standard.set("系统未批准上次回复持续后台运行。前台仍可实时接收，锁屏后可能暂停。", forKey:noticeKey)
+            }
         }
         #endif
     }
@@ -155,7 +162,7 @@ import VChatCore
     @objc private func leavingForeground() {
         // Start while still foreground-eligible, only for outstanding user requests.
         for room in model.rooms.values where room.busy && room.receivesInBackground && !room.cancelled {
-            if let id = room.backgroundJobID, !ReplyRuntime.systemPresents(id) { ReplyPresentation.start(id: id, topicID: room.id, receivedBytes: room.receivedReplyBytes) }
+            if let id = room.backgroundJobID, !ReplyRuntime.systemPresents(room.replyRuntimeID ?? id) { ReplyPresentation.start(id: id, topicID: room.id, receivedBytes: room.receivedReplyBytes) }
         }
     }
     @objc private func returningToForeground() {
