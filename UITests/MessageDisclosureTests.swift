@@ -76,10 +76,11 @@ final class MessageDisclosureTests: XCTestCase {
         guard app.staticTexts["首段"].waitForExistence(timeout:20) else { XCTFail("First chunk was not visible before completion"); return }
         XCUIDevice.shared.press(.home)
         XCTAssertNotEqual(app.state,.runningForeground)
-        _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
-        // Stay away longer than the old 25-second lease. The server cannot
-        // complete until after the partial reply is visible again.
+        // The server emits nothing else until *after* the old background lease
+        // would have ended. It still cannot finish until after we return.
         try await Task.sleep(for:.seconds(32))
+        _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
+        try await Task.sleep(for:.seconds(2))
         app.activate()
         guard app.staticTexts["首段补齐"].waitForExistence(timeout:20) else { XCTFail("Missing background chunk before completion"); return }
         XCTAssertTrue(app.buttons["停止生成"].exists)
