@@ -1,10 +1,12 @@
 import XCTest
+import UIKit
 
 final class MessageDisclosureTests: XCTestCase {
     @MainActor func testTappingOneHeaderChangesOnlyThatSection() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchEnvironment["VCHAT_TEST_DISCLOSURE_MESSAGE"] = """
+        这里的 `<script>` 是代码示例。
         <<<[TOOL_REQUEST]>>>
         tool_name:「始」天气「末」
         command:「始」查询「末」
@@ -58,5 +60,34 @@ final class MessageDisclosureTests: XCTestCase {
         tap(4); check([3,4]); XCTAssertTrue(app.staticTexts["九点"].exists)
         tap(3); check([4])
         tap(4); tap(5); check([5]); XCTAssertTrue(app.staticTexts["两次调用成功"].exists)
+    }
+    @MainActor func testScrolledMessageDoesNotPaintBehindChatHeader() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["VCHAT_TEST_DISCLOSURE_MESSAGE"] = #"<div id="vcp-root" style="height:2100px;background:#ff00ff">色带</div>"#
+        app.launch()
+        let list = app.collectionViews.firstMatch, bar = app.navigationBars.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout:20)); XCTAssertTrue(bar.waitForExistence(timeout:10))
+        guard app.webViews.staticTexts["色带"].firstMatch.waitForExistence(timeout:20) else {
+            XCTFail("The tall message did not render"); return
+        }
+        list.swipeUp()
+        let screen = app.screenshot()
+        let image = try XCTUnwrap(screen.image.cgImage)
+        let bounds = app.frame, top = bar.frame.maxY, scale = CGFloat(image.width) / bounds.width
+        // The saturated test card must fill the viewport immediately below the
+        // header. Look for that same ink leaking into the navigation or status bar.
+        func ink(from y: CGFloat, height: CGFloat) throws -> Double {
+            let strip = CGRect(x:bounds.width*0.2,y:y,width:bounds.width*0.6,height:height)
+            let cropped = try XCTUnwrap(image.cropping(to:strip.applying(.init(scaleX:scale,y:scale))))
+            let ctx = try XCTUnwrap(CGContext(data:nil,width:32,height:32,bitsPerComponent:8,bytesPerRow:128,
+                space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+            ctx.draw(cropped,in:CGRect(x:0,y:0,width:32,height:32))
+            let bytes = try XCTUnwrap(ctx.data).assumingMemoryBound(to:UInt8.self)
+            return Double((0..<1024).filter { i in bytes[i*4]>190 && bytes[i*4+1]<65 && bytes[i*4+2]>190 }.count)/1024
+        }
+        let attachment = XCTAttachment(screenshot:screen); attachment.name = "Scrolled-chat-header"; add(attachment)
+        XCTAssertGreaterThan(try ink(from:top+4,height:60),0.6, "Fixture must actually be under the header edge")
+        XCTAssertLessThan(try ink(from:bounds.minY,height:top-bounds.minY-1),0.01)
+        XCTAssertTrue(bar.buttons["历史话题"].firstMatch.isHittable)
     }
 }

@@ -571,6 +571,35 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(unlabelled.content, "无字段名的返回正文")
     }
 
+    func testQuotedHTMLTagLeavesFollowingToolPayloadAndReceiptIntact() async throws {
+        let tool = "<<<[TOOL_REQUEST]>>>", end = "<<<[END_TOOL_REQUEST]>>>"
+        let payload = "tool_name:「始」示例工具「末」,command:「始」记录字符串 <script>「末」"
+        let summary = "[本轮工具调用摘要:]\n已记录\n[本轮工具调用摘要结束]"
+        let source = "用 `<script>` 表示标签。\n\n" + tool + payload + end + "\n" + batch(summary,id:receiptID)
+        let blocks = try await MessageRenderer().render(source,options:.init(),dark:true)
+        guard blocks.count == 3, case .paragraph = blocks[0],
+              case .vcp(.tool("示例工具", "记录字符串 <script>", let body, true)) = blocks[1],
+              case .vcp(.batch(let parts,true)) = blocks[2], parts == [.summary(["已记录"],true)] else {
+            return XCTFail("Expected prose, one folded tool request, and its receipt")
+        }
+        XCTAssertEqual(body,payload)
+        let partial = "引用 `<script>`。\n" + tool + payload
+        guard case .tool(_,_,let partialBody,false) = VCPMarkup.parse(partial,protectingHTMLLiterals:true,streaming:true).last else {
+            return XCTFail("The open request should be recognized while streaming")
+        }
+        XCTAssertEqual(partialBody,payload)
+    }
+
+    func testOnlyUnquotedToolEnvelopeBecomesACard() {
+        let tool = "<<<[TOOL_REQUEST]>>>tool_name:「始」示例「末」<<<[END_TOOL_REQUEST]>>>"
+        for sample in ["``含 ` 与 <script> " + tool + "``", "```html\n<script>\n"+tool+"\n```",
+                       "<pre>"+tool+"</pre>", "<script>"+tool+"</script>", "<!-- "+tool+" -->"] {
+            let source = sample + "\n" + tool
+            XCTAssertEqual(VCPMarkup.parse(source,protectingHTMLLiterals:true),
+                           [.text(sample+"\n"), .tool("示例","","tool_name:「始」示例「末」",true)])
+        }
+    }
+
     func testDocumentedBatchInMarkdownIsLiteral() async throws {
         let sample=batch("演示",id:receiptID,shell:false)
         let fence=String(repeating:"`",count:3)
