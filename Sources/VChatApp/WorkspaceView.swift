@@ -8,6 +8,9 @@ import AppKit
 #endif
 
 struct WorkspaceView: View {
+    private struct DirectoryRequest: Equatable {
+        var origin: URL?; var ready: Bool; var revision: Int
+    }
     enum Tab: CaseIterable {
         case chats,contacts,discover,me
         var title: String { switch self { case .chats: "会话"; case .contacts: "通讯录"; case .discover: "发现"; case .me: "我" } }
@@ -55,11 +58,8 @@ struct WorkspaceView: View {
         .environment(\.workspaceMotion,motion).environment(\.workspaceTheme,model.appearance.theme)
         .environment(\.messageEmphasisColor,model.appearance.theme.tint)
         .environment(\.stickerContext,model.stickers)
-        .task(id: model.currentImageOrigin) {
-            guard let origin=model.currentImageOrigin else { return }
-            let saved=await StickerDirectories.shared.saved(origin)
-            guard !Task.isCancelled, model.currentImageOrigin==origin else { return }
-            model.stickerOrigin=origin; model.stickerCatalog=saved
+        .task(id: DirectoryRequest(origin:model.currentImageOrigin,ready:!model.loading && !model.credentialsLocked,revision:model.stickerRefreshRevision)) {
+            await model.loadStickerDirectory()
         }
         .tint(palette.accent).foregroundStyle(palette.ink)
         .sheet(item: $editing) { AgentEditor(model: model,agent: $0) }

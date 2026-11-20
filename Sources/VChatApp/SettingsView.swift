@@ -86,6 +86,7 @@ private struct AboutVChat: View {
     }
 }
 private struct RenderingSettings: View {
+    @AppStorage(TranscriptPreloadDepth.key) private var preloadDepth = TranscriptPreloadDepth.standard
     @Bindable var model: ChatViewModel
     @State private var savingBubbleRule = false
     @State private var importingStickers = false
@@ -101,7 +102,7 @@ private struct RenderingSettings: View {
                 if let file { catalog=try await StickerDirectories.shared.importFile(file,for:origin) }
                 else { catalog=try await StickerDirectories.shared.refresh(origin:origin,username:model.services.adminUsername,password:model.serviceSecrets[.adminPassword] ?? "") }
                 guard model.currentImageOrigin==origin else { return }
-                model.stickerOrigin=origin;model.stickerCatalog=catalog;mediaNotice="已更新表情目录"
+                model.stickerOrigin=origin;model.stickerCatalog=catalog;model.stickerStatus="";mediaNotice="已更新表情目录"
             } catch { mediaNotice=error.localizedDescription }
         }
     }
@@ -139,6 +140,7 @@ private struct RenderingSettings: View {
                     Text("图片与表情包").font(.headline)
                     Text("下载过的图片可在本机复用。更新目录后，自动纠正回复里的表情包名、文件名和扩展名。").font(.caption)
                     Text("本服务器目录：\(model.stickers.catalog?.count ?? 0) 张")
+                    if model.stickerCatalog == nil, !model.stickerStatus.isEmpty { Text(model.stickerStatus).font(.caption) }
                     Button("从当前 VCP 更新目录") { updateStickers() }.disabled(updatingStickers || model.currentImageOrigin == nil)
                     Button("导入表情目录 JSON") { importingStickers=true }.disabled(updatingStickers || model.currentImageOrigin == nil)
                     Button("清除已下载的聊天媒体") { Task {
@@ -152,6 +154,14 @@ private struct RenderingSettings: View {
                 }
                 Toggle("高级渲染",isOn: $model.renderOptions.enabled).font(.headline).padding(18).workspaceGlass(palette)
                 VStack(spacing: 0) {
+                    Stepper(value: Binding(get: { TranscriptPreloadDepth.clamped(preloadDepth) }, set: { preloadDepth = $0 }), in: TranscriptPreloadDepth.range) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("前后预加载：各 \(TranscriptPreloadDepth.clamped(preloadDepth)) 条")
+                            Text("前后各保留 10–20 条。附近的视觉气泡持续运行；条数越多，占用内存越多。")
+                                .font(.caption).foregroundStyle(palette.muted)
+                        }
+                    }.padding(17)
+                    WorkspaceSeparator(palette: palette)
                     toggle("代码高亮","代码块的语法着色",$model.renderOptions.code)
                     toggle("数学公式","原生数学排版与符号",$model.renderOptions.math)
                     toggle("Mermaid 图表","流程图、时序图等",$model.renderOptions.mermaid)

@@ -11,7 +11,7 @@ public final class EmoticonCatalog: @unchecked Sendable, Equatable {
     private struct Entry: Sendable { let pack, file, packKey, stem: String }
     private let items: [Entry]
     private let stems: [String:[Entry]], packs: [String:[Entry]]
-    private static func key(_ name: String) -> String { name.precomposedStringWithCanonicalMapping.lowercased() }
+    private static func key(_ name: String) -> String { name.trimmingCharacters(in:.whitespacesAndNewlines).precomposedStringWithCanonicalMapping.lowercased() }
     private static func safe(_ s: String) -> Bool {
         !s.isEmpty && s.utf8.count <= 300 && ![".",".."].contains(s) && !s.contains("/") && !s.contains("\\") && !s.unicodeScalars.contains(where: { $0.value < 32 })
     }
@@ -130,6 +130,38 @@ public struct StickerContext: Sendable, Equatable {
         }
         return catalog?.repair(url) ?? url
     }
+    func imageCandidates(_ source: String) -> [URL] {
+        guard let first = resolve(source) else { return [] }
+        guard let url = URL(string:source), url.query == nil, let pair = EmoticonCatalog.pair(url) else { return [first] }
+        var urls = [first]
+        let parts = url.pathComponents
+        let legacy = url.scheme == "https" && url.port == 6005 && parts.count == 5 &&
+            parts[1].hasPrefix("pw=") && parts[1].count > 3 && parts[2] == "images"
+        let sameHost = url.host?.lowercased() == server?.host?.lowercased()
+        // The image server in a message need not be the chat API host. Only the
+        // embedded ticket follows this same-host HTTPS proxy route, never an app secret.
+        if legacy, var proxy = URLComponents(url:url,resolvingAgainstBaseURL:false) {
+            proxy.port = nil
+            if let publicURL = proxy.url {
+                if sameHost && server?.port == 6005 { urls.append(publicURL) }
+                else if first == url { urls.insert(publicURL,at:0) }
+                urls.append(url)
+            }
+        }
+        if sameHost || url.scheme == nil || legacy, let catalog, !fileKey.isEmpty, let server,
+           var root = URLComponents(url:server,resolvingAgainstBaseURL:false), root.host != nil,
+           root.user == nil, root.password == nil, ["http","https"].contains(root.scheme) {
+            root.percentEncodedPath = "/pw=" + EmoticonCatalog.encode(fileKey) + "/images/" + EmoticonCatalog.encode(pair.pack) + "/" + EmoticonCatalog.encode(pair.file)
+            root.query = nil; root.fragment = nil
+            if let base = root.url {
+                let canonical = catalog.repair(base)
+                urls.insert(canonical,at:0)
+            }
+        }
+        var seen = Set<URL>()
+        return urls.filter { seen.insert($0).inserted }
+    }
+
 }
 private struct StickerContextKey: EnvironmentKey { static let defaultValue=StickerContext() }
 public extension EnvironmentValues {
@@ -164,13 +196,15 @@ public actor StickerDirectories {
         return catalog
     }
     public func refresh(origin: URL, username: String, password: String) async throws -> EmoticonCatalog {
-        guard Self.origin(origin)==origin, !username.isEmpty, !password.isEmpty else {
-            throw ClientError.server("请在“身份与日记”配置管理员账号，或导入桌面表情目录。")
+        guard Self.origin(origin)==origin else { throw ClientError.invalidConfiguration }
+        var headers: [String:String] = [:]
+        if !username.isEmpty, !password.isEmpty {
+            headers["Authorization"] = "Basic " + Data((username+":"+password).utf8).base64EncodedString()
         }
-        let header="Basic "+Data((username+":"+password).utf8).base64EncodedString()
-        let r=try await http.response(origin.appendingPathComponent("admin_api/emojis/list"),
-                                      headers:["Authorization":header],limit:4_000_000)
-        guard r.status==200 else { throw ClientError.server("目录接口 HTTP \(r.status)，可改用导入目录。") }
+        let r=try await http.response(origin.appendingPathComponent("admin_api/emojis/list"),headers:headers,limit:4_000_000)
+        if r.status == 401 || r.status == 403 { throw ClientError.server("表情目录需要授权。请在“身份与日记”保存管理员账号，或导入桌面表情目录。") }
+        guard r.status==200 else { throw ClientError.server("表情目录接口 HTTP \(r.status)，可改用导入目录。") }
+        try Task.checkCancellation()
         struct Response: Decodable { let success:Bool; let data:[String:[String]] }
         guard let result=try? JSONDecoder().decode(Response.self,from:r.data),result.success else { throw ClientError.server("服务器未返回表情目录") }
         return try save(result.data,for:origin)
@@ -190,5 +224,17 @@ public actor StickerDirectories {
 /// Fuzzy lookup can scan a catalog; never do it from a SwiftUI getter or a WebKit delegate.
 actor StickerResolver {
     static let shared = StickerResolver()
-    func url(_ source:String, in context:StickerContext) -> URL? { context.resolve(source) }
+    func loadImage<T:Sendable>(_ source:String, in context:StickerContext,
+                               fetch: @Sendable (URL) async throws -> T) async throws -> T {
+        let urls = context.imageCandidates(source)
+        var last: any Error = ClientError.server("表情地址不完整，请检查服务器和 File Key")
+        for url in urls {
+            try Task.checkCancellation()
+            do { return try await fetch(url) }
+            catch is CancellationError { throw CancellationError() }
+            catch { last = error }
+        }
+        throw last
+    }
+
 }

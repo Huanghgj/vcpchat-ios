@@ -28,7 +28,13 @@ import VChatRendering
     let id: String
     var mediaScope: TopicMediaScope?
     @ObservationIgnored let layoutMemory = TranscriptLayoutMemory()
-    var messages: [MessageViewModel] { didSet { depths = TurnDepths.calculate(messages.map(\.record)) } }
+    var messages: [MessageViewModel] { didSet { indexMessages() } }
+    private(set) var positions: [String:Int] = [:]
+    private func indexMessages() {
+        depths = TurnDepths.calculate(messages.map(\.record))
+        positions.removeAll(keepingCapacity: true)
+        for (index, message) in messages.enumerated() { positions[message.id] = index }
+    }
     var depths: [String: Int] = [:]
     var draft = ""
     var attachments: [ChatAttachment] = []
@@ -45,7 +51,7 @@ import VChatRendering
     @ObservationIgnored var generation: Task<Void, Never>?
     @ObservationIgnored var draftSave: Task<Void, Never>?
     init(id: String, messages: [StoredMessage]) {
-        self.id = id; self.messages = messages.map(MessageViewModel.init); depths = TurnDepths.calculate(messages)
+        self.id = id; self.messages = messages.map(MessageViewModel.init); indexMessages()
         pendingCount = messages.filter { $0.status == "pending" }.count
     }
 }
@@ -63,11 +69,38 @@ struct TopicDraft: Codable, Sendable {
     var topicStates: [String:TopicToolState] = [:]
     var profile = UserProfile()
     var renderOptions = RenderOptions()
+    var stickerStatus = ""
+    var stickerRefreshRevision = 0
+    private(set) var savedImageOrigin: URL? = nil
+    private var directoryAccount: (origin: URL, user: String, password: String)?
+    func restoreStickerAccount() {
+        guard let origin = savedImageOrigin, let bound = UserDefaults.standard.string(forKey:"native.sticker-account-origin"),
+              origin.absoluteString == bound, !credentialsLocked else { directoryAccount = nil; return }
+        directoryAccount = (origin,services.adminUsername,serviceSecrets[.adminPassword] ?? "")
+        stickerRefreshRevision += 1
+    }
+    func loadStickerDirectory() async {
+        guard let origin = currentImageOrigin else { return }
+        if stickerOrigin != origin { stickerOrigin = origin; stickerCatalog = nil; stickerStatus = "" }
+        guard stickerCatalog == nil else { return }
+        let saved = await StickerDirectories.shared.saved(origin)
+        guard !Task.isCancelled, currentImageOrigin == origin, stickerCatalog == nil else { return }
+        if let saved { stickerCatalog = saved; return }
+        guard savedImageOrigin == origin, !loading, !credentialsLocked else { return }
+        let account = directoryAccount.flatMap { $0.origin == origin ? $0 : nil }
+        do {
+            let catalog = try await StickerDirectories.shared.refresh(origin:origin,username:account?.user ?? "",password:account?.password ?? "")
+            guard !Task.isCancelled, currentImageOrigin == origin, stickerCatalog == nil else { return }
+            stickerCatalog = catalog; stickerStatus = ""
+        } catch {
+            if !Task.isCancelled, currentImageOrigin == origin, stickerCatalog == nil { stickerStatus = error.localizedDescription }
+        }
+    }
     var stickerCatalog: EmoticonCatalog?
     var stickerOrigin: URL?
     var currentImageOrigin: URL? { StickerDirectories.origin(try? configuration.baseURL()) }
     var stickers: StickerContext {
-        StickerContext(server: currentImageOrigin, fileKey: serviceSecrets[.fileKey] ?? "",
+        StickerContext(server: currentImageOrigin, fileKey: currentImageOrigin == savedImageOrigin ? (serviceSecrets[.fileKey] ?? "") : "",
                        catalog: stickerOrigin == currentImageOrigin ? stickerCatalog : nil)
     }
     var appearance = AppearanceSettings()
@@ -147,6 +180,13 @@ struct TopicDraft: Codable, Sendable {
         self.vault = vault ?? CredentialVault(persistence: storage)
         if let data = UserDefaults.standard.data(forKey: "native.connection"), let saved = try? JSONDecoder().decode(ConnectionConfiguration.self, from: data) { configuration = saved }
         else { configuration = ConnectionConfiguration() }
+        if UserDefaults.standard.data(forKey:"native.connection") != nil {
+            savedImageOrigin = StickerDirectories.origin(try? configuration.baseURL())
+            // Migrate the existing saved account once, never an unsaved server field.
+            if UserDefaults.standard.object(forKey:"native.sticker-account-origin") == nil {
+                UserDefaults.standard.set(savedImageOrigin?.absoluteString ?? "",forKey:"native.sticker-account-origin")
+            }
+        }
     }
     func load() async {
         guard store == nil else { return }
@@ -198,11 +238,15 @@ struct TopicDraft: Codable, Sendable {
         } catch { self.error = error.localizedDescription }
         loading = false
     }
-    func saveServices() async -> Bool {
+    func saveServices(bindStickerAccount: Bool = false) async -> Bool {
         guard !credentialsLocked else { error = "请先在连接设置中解锁已有连接，再保存服务密钥"; return false }
         do {
             for name in ServiceSecret.allCases { try await vault.save(serviceSecrets[name] ?? "",name: name.rawValue) }
             try await store?.put(services,kind: "services",id: "settings")
+            if bindStickerAccount, let origin = currentImageOrigin, origin == savedImageOrigin {
+                UserDefaults.standard.set(origin.absoluteString,forKey:"native.sticker-account-origin")
+                restoreStickerAccount()
+            }
             if !credentialsInMemory { UserDefaults.standard.set(true,forKey: "native.secrets-exist") }
             return true
         } catch { self.error = error.localizedDescription; return false }
@@ -358,11 +402,13 @@ struct TopicDraft: Codable, Sendable {
             let imported = try await DesktopConnection.read(from: url)
             var config = imported.configuration; config.model = imported.preferredModel ?? configuration.model
             configuration = config; apiKey = imported.apiKey; logKey = imported.logKey
+            if let key = imported.fileKey { serviceSecrets[.fileKey] = key }
             if let sync = imported.syncSettings,let token = imported.syncToken {
                 services.sync = sync; serviceSecrets[.syncToken] = token
             }
             guard await saveConnection() else { return }
-            if imported.syncSettings != nil { guard await saveServices() else { return } }
+            if let key = imported.fileKey { try await vault.save(key,name:ServiceSecret.fileKey.rawValue) }
+            if let token = imported.syncToken { try await vault.save(token,name:ServiceSecret.syncToken.rawValue) }
             error = nil
         } catch { self.error = "导入失败，请选择有效的桌面连接或手机配对文件" }
     }
@@ -378,6 +424,11 @@ struct TopicDraft: Codable, Sendable {
             try await vault.save(chat, name: "chat-api-key"); try await vault.save(log, name: "vcp-log-key")
             try await store?.put(services,kind: "services",id: "settings")
             UserDefaults.standard.set(data, forKey: "native.connection")
+            savedImageOrigin = StickerDirectories.origin(try? config.baseURL())
+            if UserDefaults.standard.object(forKey:"native.sticker-account-origin") == nil {
+                UserDefaults.standard.set("",forKey:"native.sticker-account-origin")
+            }
+            stickerRefreshRevision += 1
             return true
         } catch { self.error = error.localizedDescription; return false }
     }

@@ -65,6 +65,7 @@ struct NativeMessageMedia: View {
     @Environment(\.messageLayoutMemory) private var layoutMemory
     @State private var localSize:CGSize?
     @Environment(\.stickerContext) private var stickers
+    @Environment(\.transcriptRenderBuffer) private var buffer
     @Environment(\.messageViewport) private var viewport
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -108,16 +109,14 @@ struct NativeMessageMedia: View {
             .onChange(of: visible) { _,v in if !v { video.close() } }
             .task(id: Load(source:item.id,stickers:stickers,visible:visible,owner:owner)) {
                 guard visible,item.kind == "image", image == nil else { return }
-                let source: String
-                if item.source.lowercased().hasPrefix("data:") { source=item.source }
-                else if let url=await StickerResolver.shared.url(item.source,in:stickers) { source=url.absoluteString }
-                else { if !Task.isCancelled { issue="表情地址不完整，请设置服务器和 File Key" }; return }
-                guard !Task.isCancelled else { return }
-                if let owner, !source.hasPrefix("data:"), let url=URL(string:source) {
-                    localSize=owner.imageSizes[RemoteImageStore.key(url)] ?? layoutMemory?.imageSize(messageID,item.source)
+                if let ready = buffer?.image(message: messageID,source: item.source,owner: owner,stickers: stickers) {
+                    image = ready; issue = nil; return
                 }
+                let scope = owner
                 do {
-                    let value = try await NativeMediaLoader.shared.image(source,owner:owner)
+                    let value = try await StickerResolver.shared.loadImage(item.source,in:stickers) { url in
+                        try await NativeMediaLoader.shared.image(url.absoluteString,owner:scope)
+                    }
                     if !Task.isCancelled {
                         let size=CGSize(width:value.width,height:value.height)
                         localSize=size; layoutMemory?.rememberImage(size,messageID,item.source)

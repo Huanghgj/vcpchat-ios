@@ -71,6 +71,19 @@ enum LooseImageTags {
             while f < fences.count && NSMaxRange(fences[f]) <= t.range.location { f += 1 }
             guard f==fences.count || !NSLocationInRange(t.range.location,fences[f]),
                   raw.substring(with:t.range).range(of:#"^<[ \t]+$"#,options:.regularExpression) != nil else { continue }
+            // A reply can end midway through a decorative style attribute. Recover only
+            // a complete, quoted sticker src on that same final line. Never guess a URL.
+            let tailRange = NSRange(location:NSMaxRange(t.range),length:raw.length-NSMaxRange(t.range))
+            if tailRange.length <= 4096 {
+                let tail = raw.substring(with:tailRange)
+                let pattern = #"(?i)^img[ \t]+src=(["'])([^"'<>\r\n]+)\1([ \t]+width=(?:["'][0-9]{1,4}["']|[0-9]{1,4}))?[ \t]+style=["'][^"'<>\r\n]*\z"#
+                if tail.range(of:pattern,options:.regularExpression) != nil,
+                   let style = tail.range(of:#"[ \t]+style="#,options:[.regularExpression,.caseInsensitive]),
+                   let media = MessageMedia.html("<" + tail[..<style.lowerBound] + ">"),
+                   let url = URL(string:media.source), EmoticonCatalog.pair(url) != nil {
+                    return out + raw.substring(with:NSRange(location:start,length:t.range.location-start)) + "<" + tail[..<style.lowerBound] + ">"
+                }
+            }
             out += raw.substring(with:NSRange(location:start,length:t.range.location-start)) + "<";start=NSMaxRange(t.range)
         }
         return start == 0 ? source : out + raw.substring(from:start)

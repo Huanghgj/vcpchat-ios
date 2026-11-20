@@ -227,7 +227,7 @@ private struct MemoryConnectionView: View {
             SecureField("日记管理员密码",text: Binding(get: { center.app.serviceSecrets[.adminPassword] ?? "" },set: { center.app.serviceSecrets[.adminPassword] = $0 }))
             Text("日记接口使用管理员连接；语义检索另用现有聊天 API Key。只有你主动解锁后才读取钥匙串。").font(.callout).foregroundStyle(.secondary)
             if let error = center.error { Text(error).foregroundStyle(.red) }
-            Button("保存连接") { center.perform { guard await center.app.saveServices() else { throw ClientError.server(center.app.error ?? "连接保存失败") }; dismiss() } }.workspaceRowAction().disabled(center.working)
+            Button("保存连接") { center.perform { guard await center.app.saveServices(bindStickerAccount:true) else { throw ClientError.server(center.app.error ?? "连接保存失败") }; dismiss() } }.workspaceRowAction().disabled(center.working)
         }.navigationTitle("记忆服务连接").toolbar { ToolbarItem(placement: .cancellationAction) { Button { dismiss() } label: { Text("关闭").frame(minWidth: 44,minHeight: 44).contentShape(Rectangle()) } } }
     }
 }

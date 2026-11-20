@@ -98,23 +98,30 @@ public struct RichMessageBody: View {
     public var expandsToFill: Bool
     @Environment(\.messageLayoutMemory) private var memory
     @Environment(\.renderedMessageID) private var messageID
-    private var parsedKey:String { expandsToFill ? messageID : "" }
-    private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:depth) }
+    private var parsedKey:String { transcriptRow ? messageID : "" }
+    @Environment(\.parentIsland) private var parentIsland
+    private var transcriptRow: Bool
+    private var input:RenderState.Input { .init(source:source,options:options,dark:scheme == .dark,streaming:streaming,rules:rules,role:role,depth:rules.isEmpty ? 0 : depth) }
     @State private var rendering = RenderState()
     @State private var visible = false
     @Environment(\.colorScheme) private var scheme
     @Environment(\.scenePhase) private var phase
-    public init(_ source: String, options: RenderOptions = RenderOptions(), streaming: Bool = false, rules: [RegexRule] = [], role: String = "assistant", depth: Int = 0, expandsToFill: Bool = true) { self.source = source; self.options = options; self.streaming = streaming; self.rules = rules; self.role = role; self.depth = depth; self.expandsToFill = expandsToFill }
-    private var plain: Bool { rules.isEmpty && (!options.enabled || (!source.contains("http://") && !source.contains("https://") && !(source.contains("@") && source.contains(".")) && (!source.hasPrefix("- ") && !source.contains("\n- ") && !source.contains("\n1. ") && !source.hasPrefix("1. ") && !source.contains(where: { "`~*#_[]<>$|\\".contains($0) })))) }
+    public init(_ source: String, options: RenderOptions = RenderOptions(), streaming: Bool = false, rules: [RegexRule] = [], role: String = "assistant", depth: Int = 0, expandsToFill: Bool = true, transcriptRow: Bool = false) { self.transcriptRow = transcriptRow; self.source = source; self.options = options; self.streaming = streaming; self.rules = rules; self.role = role; self.depth = depth; self.expandsToFill = expandsToFill }
+    static func isPlain(_ source: String, options: RenderOptions, rules: [RegexRule]) -> Bool { rules.isEmpty && (!options.enabled || (!source.contains("http://") && !source.contains("https://") && !(source.contains("@") && source.contains(".")) && (!source.hasPrefix("- ") && !source.contains("\n- ") && !source.contains("\n1. ") && !source.hasPrefix("1. ") && !source.contains(where: { "`~*#_[]<>$|\\".contains($0) })))) }
+    private var plain: Bool { Self.isPlain(source,options:options,rules:rules) }
+    private var saved: FinishedReply? {
+        guard !streaming, !parsedKey.isEmpty, let value = memory?.finishedReplies.object(forKey: parsedKey as NSString),
+              value.input == input else { return nil }
+        return value
+    }
     public var body: some View {
         Group {
             if plain { Text(verbatim: source).modifier(MessageTextSelection()) }
-            else if !streaming, !rendering.hasRendered, !parsedKey.isEmpty,
-                    let saved=memory?.finishedReplies.object(forKey:parsedKey as NSString), saved.input==input {
-                NativeBlocks(blocks:saved.blocks, options:options, streaming:false).equatable()
-            }
-            else if !rendering.hasRendered && rendering.blocks.isEmpty { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
-            else { NativeBlocks(blocks: rendering.blocks, options: options,streaming: rendering.streaming).equatable() }
+            else if rendering.hasRendered || !rendering.blocks.isEmpty || saved != nil {
+                NativeBlocks(blocks: rendering.hasRendered ? rendering.blocks : (saved?.blocks ?? rendering.blocks),
+                             options: options, streaming: rendering.hasRendered && rendering.streaming,
+                             transcriptID: transcriptRow ? messageID : nil, parentIsland: parentIsland).equatable()
+            } else { Text("正在排版…").font(.caption).foregroundStyle(.secondary).frame(minHeight: 44) }
         }
         // A self-sizing chat row may initially propose just one line while a sticker
         // loads or the reasoning disclosure is toggled. Keep the proposed width and
@@ -122,7 +129,7 @@ public struct RichMessageBody: View {
         .lineLimit(nil)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: expandsToFill ? .infinity : nil, alignment: .leading)
-        .onChange(of: RenderState.Input(source: source, options: options, dark: scheme == .dark, streaming: streaming, rules: rules, role: role, depth: depth), initial: true) { _, input in
+        .onChange(of: input, initial: true) { _, input in
             if visible && phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } else { rendering.cancel() }
         }
         .onAppear { visible = true; if phase != .background && !plain { rendering.update(input,memory:memory,id:parsedKey) } }
@@ -138,22 +145,25 @@ private struct NativeBlocks: View, Equatable {
     var blocks: [RenderBlock]
     var options: RenderOptions
     var streaming = false
+    var transcriptID: String?
+    var parentIsland: IslandSlot?
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in blockView(block) }
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in blockView(block, index: index) }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
-    @ViewBuilder func blockView(_ block: RenderBlock) -> some View {
+    @ViewBuilder func blockView(_ block: RenderBlock, index: Int) -> some View {
+        let slot = transcriptID.map { IslandSlot(message:$0,index:index) } ?? parentIsland?.child(String(index))
         switch block {
-        case .html(let source): HTMLIsland(source: source, options: options,streaming: streaming)
+        case .html(let source): HTMLIsland(source: source, options: options,streaming: streaming, slot: slot)
         case .diagram(let source,let raster): VStack(alignment: .leading,spacing: 8) { NativeDiagram(source: source,raster: raster); DisclosureGroup("图表源码") { NativeCode(language: "mermaid",source: source,spans: []) } }
-        case .vcp(let segment): VCPCardView(segment: segment, options: options)
+        case .vcp(let segment): VCPCardView(segment: segment, options: options).environment(\.parentIsland,slot)
         case .literal(let text): Text(verbatim: text).modifier(MessageTextSelection())
         case .paragraph(let runs): InlineBody(runs: runs,animations: options.motion)
         case .heading(let level, let text): InlineBody(runs: text,animations: options.motion).font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
+        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming,parentIsland:slot).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
         case .list(let items, let start):
-            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming) } } }
+            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming,parentIsland:slot?.child(String(index))) } } }
         case .rule: Divider()
         case .math(let source): ScrollView(.horizontal) { NativeMath(source).fixedSize().padding(.vertical, 3) }
         case .code(let language, let code, let spans): NativeCode(language: language, source: code, spans: spans)

@@ -23,16 +23,17 @@ import VChatCore
         let context = stickers, scope = owner, movie=locator.host=="movie"
         tasks[id] = Task {
             do {
-                guard let target=await StickerResolver.shared.url(raw,in:context),target.scheme?.lowercased()=="https", !Task.isCancelled else {
-                    throw URLError(.unsupportedURL)
-                }
+                try Task.checkCancellation()
                 let data:Data, mime:String
                 if movie {
-                    guard let scope else { throw URLError(.unsupportedURL) }
+                    guard let scope, let target=URL(string:raw), target.scheme?.lowercased()=="https" else { throw URLError(.unsupportedURL) }
                     let v=try await TopicVideoStore.shared.resource(target,owner:scope)
                     data=v.data;mime=v.mime
                 } else {
-                    let v=try await store.resource(target,owner:scope)
+                    let v=try await StickerResolver.shared.loadImage(raw,in:context) { [store] target in
+                        guard target.scheme?.lowercased()=="https" else { throw URLError(.unsupportedURL) }
+                        return try await store.resource(target,owner:scope)
+                    }
                     data=v.data;mime=v.mime
                 }
                 guard !Task.isCancelled, tasks[id] != nil else { return }

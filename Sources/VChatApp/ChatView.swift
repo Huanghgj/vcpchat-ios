@@ -33,7 +33,7 @@ struct ChatView: View {
                 if let error = model.room?.error ?? model.error {
                     HStack { Text(error).font(.callout); Spacer(); Button { model.room?.error = nil; model.error = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }.padding(14).background(.red.opacity(0.09)).foregroundStyle(.red)
                 }
-                ChatTimeline(model: model)
+                ChatTimeline(model: model).id(model.activeTopicID)
                 if model.locationEnabledInChat { LocationSharingChip(model: model) }
                 if model.pendingCount > 0 { Text("\(model.pendingCount) 条本机待确认消息；不会自动重复发送").font(.caption).foregroundStyle(.secondary).padding(.horizontal) }
                 if let room = model.room, !room.attachments.isEmpty { AttachmentStrip(attachments: room.attachments) { id in Task { await model.detach(id) } }.padding(.horizontal, 16).padding(.bottom, 6) }
@@ -131,6 +131,33 @@ private struct ChatTimeline: View {
     @State private var openSettings = false
     @State private var viewport = CGRect.zero
     @State private var layoutVersion = 0
+    @State private var lastVisibleID: String?
+    @State private var visibleIDs: Set<String> = []
+    @State private var buffer = TranscriptRenderBuffer()
+    @AppStorage(TranscriptPreloadDepth.key) private var preloadDepth = TranscriptPreloadDepth.standard
+
+    private func row(_ message: MessageViewModel) -> some View {
+        NativeMessageRow(message: message,model: model)
+            .onGeometryChange(for: Bool.self) { [viewport] geometry in
+                viewport.intersects(geometry.frame(in: .named("vcp-message-viewport")))
+            } action: { visible in
+                if visible { visibleIDs.insert(message.id); lastVisibleID = message.id } else { visibleIDs.remove(message.id) }
+            }
+            .onDisappear { visibleIDs.remove(message.id) }
+            .id(message.id)
+    }
+
+    private var nearby: [TranscriptRenderItem] {
+        guard model.renderOptions.enabled, let room = model.room else { return [] }
+        let anchors = visibleIDs.isEmpty ? Set([lastVisibleID].compactMap { $0 }) : visibleIDs
+        let indices = anchors.compactMap { room.positions[$0] }
+        return TranscriptPreloadDepth.indices(count: room.messages.count, visible: indices, depth: preloadDepth).map { index in
+            let message = room.messages[index]
+            return TranscriptRenderItem(id: message.id, source: message.text, role: message.role,
+                                        depth: room.depths[message.id] ?? 0, rules: model.displayRules(for: message),
+                                        streaming: ["connecting","streaming"].contains(message.status))
+        }
+    }
     var body: some View {
                 ScrollViewReader { proxy in
                     Group {
@@ -142,8 +169,7 @@ private struct ChatTimeline: View {
                                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
                             }
                             ForEach(model.messages) { message in
-                                NativeMessageRow(message: message,model: model)
-                                    .id(message.id)
+                                row(message)
                                     .listRowInsets(EdgeInsets(top: 12,leading: 20,bottom: 12,trailing: 20))
                                     .listRowBackground(Color.clear).listRowSeparator(.hidden)
                             }
@@ -171,7 +197,7 @@ private struct ChatTimeline: View {
                                 if model.messages.isEmpty && !model.loading {
                                     emptyState
                                 }
-                                ForEach(model.messages) { message in NativeMessageRow(message: message, model: model).id(message.id) }
+                                ForEach(model.messages) { message in row(message) }
                                 Color.clear.frame(height: 1).id("latest")
                             }.padding(.horizontal, 20).padding(.vertical, 22)
                                 .background {
@@ -187,6 +213,12 @@ private struct ChatTimeline: View {
                         }
                         #endif
                     }
+                    .background {
+                        TranscriptPreloader(items: nearby, options: model.renderOptions, buffer: buffer,
+                                            width: max(1, viewport.width - 74), memory: model.room?.layoutMemory)
+                            .environment(\.topicMediaOwner, model.room?.mediaScope)
+                    }
+                    .environment(\.transcriptRenderBuffer, buffer)
                     .environment(\.messageViewport, viewport)
                     .coordinateSpace(name: "vcp-message-viewport")
                     .onGeometryChange(for: CGSize.self,of: { $0.size }) { viewport = CGRect(origin: .zero,size: $0) }
@@ -252,7 +284,7 @@ private struct NativeMessageRow: View {
                         if !message.attachments.isEmpty { AttachmentStrip(attachments: message.attachments) }
                         if let notice = message.syncNotice { Label(notice,systemImage: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(palette.muted) }
                         if !message.reasoning.isEmpty { DisclosureGroup("思考过程") { Text(verbatim:message.reasoning).font(.callout).foregroundStyle(palette.muted).lineLimit(nil).fixedSize(horizontal:false,vertical:true).textSelection(.disabled) } }
-                        RichMessageBody(message.text.isEmpty && message.status == "connecting" ? "正在连接…" : message.text,options: model.renderOptions,streaming: streaming,rules: model.displayRules(for: message),role: message.role,depth: model.rooms[message.topicID]?.depths[message.id] ?? 0,expandsToFill: message.role != "user").font(.system(size: 16)).lineSpacing(5)
+                        RichMessageBody(message.text.isEmpty && message.status == "connecting" ? "正在连接…" : message.text,options: model.renderOptions,streaming: streaming,rules: model.displayRules(for: message),role: message.role,depth: model.rooms[message.topicID]?.depths[message.id] ?? 0,expandsToFill: message.role != "user", transcriptRow: true).font(.system(size: 16)).lineSpacing(5)
                     }.environment(\.messageTextSelectionEnabled,false)
                     .environment(\.topicMediaOwner,model.rooms[message.topicID]?.mediaScope)
                     .environment(\.messageLayoutMemory,model.rooms[message.topicID]?.layoutMemory)

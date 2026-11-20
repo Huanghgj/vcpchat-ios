@@ -16,7 +16,7 @@ public extension EnvironmentValues {
     let finishedReplies = NSCache<NSString,FinishedReply>()
     private let heights = NSCache<NSString,NSNumber>()
     private let images = NSCache<NSString,NSValue>()
-    public init() { heights.countLimit=512; images.countLimit=1024; finishedReplies.countLimit=24; finishedReplies.totalCostLimit=3*1024*1024 }
+    public init() { heights.countLimit=512; images.countLimit=1024; finishedReplies.countLimit=24 + 2 * TranscriptPreloadDepth.range.upperBound; finishedReplies.totalCostLimit=3*1024*1024 }
     public func clear() { finishedReplies.removeAllObjects(); heights.removeAllObjects(); images.removeAllObjects() }
     private func key(_ id:String,_ source:String,_ width:CGFloat,_ variant:String) -> NSString {
         "\(id):\(source.hashValue):\(Int(width.rounded())):\(variant)" as NSString
