@@ -16,9 +16,10 @@ import VChatCore
         _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting),
             staleDate: Date().addingTimeInterval(600)), pushType: nil)
     }
-    static func hideWaitingOnReturn() async {
-        let waiting = Activity<ReplyActivityAttributes>.activities.filter { $0.content.state.phase == .waiting }
-        for activity in waiting { await activity.end(nil, dismissalPolicy: .immediate) }
+    nonisolated static func hideWaitingOnReturn(ids: Set<String>) async {
+        for activity in Activity<ReplyActivityAttributes>.activities where ids.contains(activity.id) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
     }
     static func dismissOrphanedActivities(activeIDs: Set<String>) async {
         for activity in Activity<ReplyActivityAttributes>.activities where !activeIDs.contains(activity.attributes.jobID) {
@@ -73,7 +74,8 @@ import VChatCore
         }
     }
     @objc private func returningToForeground() {
-        Task { await ReplyPresentation.hideWaitingOnReturn() }
+        let ids = Set(Activity<ReplyActivityAttributes>.activities.compactMap { $0.content.state.phase == .waiting ? $0.id : nil })
+        Task { await ReplyPresentation.hideWaitingOnReturn(ids: ids) }
     }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
         guard identifier == BackgroundReplyTransfers.identifier else { completionHandler(); return }
