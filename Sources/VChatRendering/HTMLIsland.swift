@@ -272,18 +272,14 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     static let shared = IslandPool()
     private var idle: [WKWebView] = []
     private var active: [UUID: WKWebView] = [:]
-    @ObservationIgnored private var parked: [UUID:() -> Void] = [:]
+    private var standAlone = Set<UUID>()
     var revision = 0
-    func attach(_ id: UUID) { parked[id] = nil }
-    func park(_ id: UUID, evict: @escaping () -> Void) {
-        parked[id] = evict
-        revision += 1
-    }
-    func take(_ id: UUID, speculative: Bool) -> WKWebView? {
+    func take(_ id: UUID, transcript: Bool) -> WKWebView? {
         if let view = active[id] { return view }
-        let limit = speculative ? TranscriptRenderBuffer.parkedLimit : TranscriptRenderBuffer.visibleLimit
-        if !speculative, active.count >= limit { parked.values.first?() }
-        guard active.count < limit else { return nil }
+        if !transcript {
+            guard standAlone.count < 3 else { return nil }
+            standAlone.insert(id)
+        }
         let view: WKWebView
         if let reusable = idle.popLast() { view = reusable }
         else {
@@ -306,8 +302,9 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
         return view
     }
     func release(_ id: UUID) {
-        parked[id] = nil
+        standAlone.remove(id)
         guard let view = active.removeValue(forKey: id) else { return }
+        view.removeFromSuperview()
         view.stopLoading(); (view.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme)?.invalidate(); view.setAllMediaPlaybackSuspended(true)
         view.navigationDelegate = nil; view.uiDelegate = nil
         view.configuration.userContentController.removeAllScriptMessageHandlers()
@@ -332,9 +329,9 @@ extension EnvironmentValues { public var messageViewport: CGRect? { get { self[V
     @ObservationIgnored private var latest: Input?
     @ObservationIgnored private var pending: Input?
     @ObservationIgnored private var updateTask: Task<Void,Never>?
-    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?, speculative: Bool = false, initialWidth: CGFloat? = nil) {
+    func mount(_ document: String, source: String, streaming: Bool, media: Bool, stickers: StickerContext, owner:TopicMediaScope?, transcript: Bool = false, initialWidth: CGFloat? = nil) {
         guard let runtime = IslandScripts.runtime else { failed = true; failureMessage = "气泡渲染组件缺失，请更新 App"; return }
-        guard let web = view ?? IslandPool.shared.take(id, speculative: speculative) else { return }
+        guard let web = view ?? IslandPool.shared.take(id, transcript: transcript) else { return }
         if view == nil, let initialWidth { web.frame = CGRect(x: 0,y: 0,width: initialWidth,height: height) }
         let imageScheme=web.configuration.urlSchemeHandler(forURLScheme:IslandImageScheme.name) as? IslandImageScheme
         let contextChanged=imageScheme?.stickers != stickers || imageScheme?.owner != owner
@@ -435,7 +432,12 @@ struct HTMLIsland: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.stickerContext) private var stickers
     @Environment(\.messageLongPressAction) private var showMessageActions
-    private var visible: Bool { appeared && phase == .active && (viewport == nil || layout.onScreen) }
+    private var visible: Bool {
+        guard appeared, phase != .background else { return false }
+        if viewport == nil || layout.onScreen { return true }
+        guard let slot, let buffer, buffer.window.ids.contains(slot.message) else { return false }
+        return true
+    }
     private var heightVariant:String { String(document.hashValue) }
     private func restoreSize() {
         if let h=memory?.islandHeight(messageID:messageID,source:source,width:layout.width,variant:heightVariant) { reservedHeight=h; controller?.height=h }
@@ -447,7 +449,7 @@ struct HTMLIsland: View {
         Group {
             if let controller, let view = controller.view { IslandNativeView(view: view,showActions: showMessageActions).id(ObjectIdentifier(view)).frame(height: controller.height) }
             else if let controller, controller.failed { Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height) }
-            else { Label(visible ? "等待加载视觉气泡" : "视觉气泡已暂停", systemImage: "rectangle.inset.filled").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight) }
+            else { Color.clear.frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight).accessibilityHidden(true) }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onGeometryChange(for: Visibility.self,of: { [viewport] g in
@@ -477,7 +479,7 @@ struct HTMLIsland: View {
         }
         let id=messageID, value=source, variant=heightVariant
         host.remember = { [weak memory] h,w in memory?.rememberIslandHeight(h,messageID:id,source:value,width:w,variant:variant) }
-        host.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner)
+        host.mount(document,source:source,streaming:streaming,media:options.media,stickers:stickers,owner:owner,transcript:slot != nil && buffer != nil)
         if needsAttachment { host.view?.setAllMediaPlaybackSuspended(!options.media) }
     }
     private func release() {
@@ -495,9 +497,16 @@ private struct IslandNativeView: UIViewRepresentable {
     var view: WKWebView
     var showActions: (@MainActor @Sendable () -> Void)?
     func makeCoordinator() -> IslandPressHandler { IslandPressHandler() }
-    func makeUIView(context: Context) -> WKWebView { context.coordinator.attach(to: view); return view }
-    func updateUIView(_ uiView: WKWebView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.gesture?.isEnabled = showActions != nil }
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: IslandPressHandler) { coordinator.detach(from: uiView) }
+    func makeUIView(context: Context) -> UIView {
+        let host = UIView(frame:view.bounds)
+        view.frame = host.bounds; view.autoresizingMask = [.flexibleWidth,.flexibleHeight]
+        host.addSubview(view); context.coordinator.attach(to:view)
+        return host
+    }
+    func updateUIView(_ host: UIView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.gesture?.isEnabled = showActions != nil }
+    static func dismantleUIView(_ host: UIView, coordinator: IslandPressHandler) {
+        if let web = coordinator.gesture?.view as? WKWebView { coordinator.detach(from:web) }
+    }
 }
 @MainActor private final class IslandPressHandler: NSObject, UIGestureRecognizerDelegate {
     var showActions: (@MainActor @Sendable () -> Void)?
@@ -516,9 +525,16 @@ private struct IslandNativeView: NSViewRepresentable {
     var view: WKWebView
     var showActions: (@MainActor @Sendable () -> Void)?
     func makeCoordinator() -> IslandPressHandler { IslandPressHandler() }
-    func makeNSView(context: Context) -> WKWebView { context.coordinator.attach(to: view); return view }
-    func updateNSView(_ nsView: WKWebView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.gesture?.isEnabled = showActions != nil }
-    static func dismantleNSView(_ nsView: WKWebView, coordinator: IslandPressHandler) { coordinator.detach(from: nsView) }
+    func makeNSView(context: Context) -> NSView {
+        let host = NSView(frame:view.bounds)
+        view.frame = host.bounds; view.autoresizingMask = [.width,.height]
+        host.addSubview(view); context.coordinator.attach(to:view)
+        return host
+    }
+    func updateNSView(_ host: NSView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.gesture?.isEnabled = showActions != nil }
+    static func dismantleNSView(_ host: NSView, coordinator: IslandPressHandler) {
+        if let web = coordinator.gesture?.view as? WKWebView { coordinator.detach(from:web) }
+    }
 }
 @MainActor private final class IslandPressHandler: NSObject, NSGestureRecognizerDelegate {
     var showActions: (@MainActor @Sendable () -> Void)?

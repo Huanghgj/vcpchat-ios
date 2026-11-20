@@ -131,6 +131,7 @@ private struct ChatTimeline: View {
     @State private var openSettings = false
     @State private var viewport = CGRect.zero
     @State private var layoutVersion = 0
+    @State private var lastVisibleID: String?
     @State private var visibleIDs: Set<String> = []
     @State private var buffer = TranscriptRenderBuffer()
     @AppStorage(TranscriptPreloadDepth.key) private var preloadDepth = TranscriptPreloadDepth.standard
@@ -140,7 +141,7 @@ private struct ChatTimeline: View {
             .onGeometryChange(for: Bool.self) { [viewport] geometry in
                 viewport.intersects(geometry.frame(in: .named("vcp-message-viewport")))
             } action: { visible in
-                if visible { visibleIDs.insert(message.id) } else { visibleIDs.remove(message.id) }
+                if visible { visibleIDs.insert(message.id); lastVisibleID = message.id } else { visibleIDs.remove(message.id) }
             }
             .onDisappear { visibleIDs.remove(message.id) }
             .id(message.id)
@@ -148,7 +149,8 @@ private struct ChatTimeline: View {
 
     private var nearby: [TranscriptRenderItem] {
         guard model.renderOptions.enabled, let room = model.room else { return [] }
-        let indices = visibleIDs.compactMap { room.positions[$0] }
+        let anchors = visibleIDs.isEmpty ? Set([lastVisibleID].compactMap { $0 }) : visibleIDs
+        let indices = anchors.compactMap { room.positions[$0] }
         return TranscriptPreloadDepth.indices(count: room.messages.count, visible: indices, depth: preloadDepth).map { index in
             let message = room.messages[index]
             return TranscriptRenderItem(id: message.id, source: message.text, role: message.role,

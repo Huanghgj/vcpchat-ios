@@ -4,6 +4,7 @@ import Foundation
 public struct DesktopConnection: Sendable {
     public let configuration: ConnectionConfiguration
     public let apiKey: String
+    public let fileKey: String?
     public let logKey: String
     public let preferredModel: String?
     public let syncSettings: MobileSyncSettings?
@@ -18,7 +19,7 @@ public struct DesktopConnection: Sendable {
     public init(data: Data) throws {
         struct Pairing: Decodable { let httpURL: String; let socketURL: String; let token: String }
         struct Desktop: Decodable {
-            let vcpServerUrl: String; let vcpApiKey: String; let vcpLogKey: String?
+            let vcpServerUrl: String; let vcpApiKey: String; let vcpLogKey: String?; let fileKey: String?
             let vchatModel: String?; let vchatMobileSync: Pairing?
         }
         let decoded = try JSONDecoder().decode(Desktop.self, from: data)
@@ -26,6 +27,7 @@ public struct DesktopConnection: Sendable {
         _ = try configuration.baseURL()
         guard !decoded.vcpApiKey.isEmpty else { throw ClientError.missingKey }
         apiKey = decoded.vcpApiKey; logKey = decoded.vcpLogKey ?? ""
+        fileKey = decoded.fileKey.flatMap { $0.isEmpty ? nil : $0 }
         preferredModel = decoded.vchatModel?.trimmingCharacters(in: .whitespacesAndNewlines)
         if preferredModel?.isEmpty == true { throw ClientError.invalidConfiguration }
         if let pairing = decoded.vchatMobileSync {

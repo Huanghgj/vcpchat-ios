@@ -25,6 +25,7 @@ extension ChatViewModel {
             catch { locked = true; if allowInteraction { self.error = error.localizedDescription } }
         }
         credentialsLocked = locked
+        restoreStickerAccount()
         await restoreRequestedConnections()
     }
 }

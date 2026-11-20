@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 import VChatCore
 #if os(iOS)
 import UIKit
@@ -7,13 +8,14 @@ import UIKit
 public enum TranscriptPreloadDepth {
     public static let key = "transcript.preloadDepth"
     public static let standard = 10
-    public static let range = 0...20
+    public static let range = 10...20
+    public static func clamped(_ value:Int) -> Int { min(range.upperBound,max(range.lowerBound,value)) }
 
     /// Enumerate only the visible rows and their neighbours; a scroll jump must
     /// not visit the whole span between a disappearing and an arriving cell.
     public static func indices(count: Int, visible: [Int], depth: Int) -> [Int] {
-        let depth = min(range.upperBound,max(0,depth))
-        guard depth > 0, count > 0 else { return [] }
+        let depth = clamped(depth)
+        guard count > 0 else { return [] }
         var seen = Set(visible.filter { (0..<count).contains($0) })
         if seen.isEmpty { seen.insert(count - 1) }
         let anchors = seen.sorted()
@@ -45,7 +47,19 @@ public struct TranscriptRenderItem: Equatable {
     }
 }
 
-struct IslandSlot: Hashable { let message: String; let index: Int }
+struct IslandSlot: Hashable {
+    let message: String
+    let index: Int
+    var path: String = ""
+    func child(_ name: String) -> IslandSlot { .init(message:message,index:index,path:path + "/" + name) }
+}
+private struct ParentIslandKey: EnvironmentKey { static let defaultValue: IslandSlot? = nil }
+extension EnvironmentValues {
+    var parentIsland: IslandSlot? {
+        get { self[ParentIslandKey.self] }
+        set { self[ParentIslandKey.self] = newValue }
+    }
+}
 private struct BufferKey: EnvironmentKey { static let defaultValue: TranscriptRenderBuffer? = nil }
 public extension EnvironmentValues {
     var transcriptRenderBuffer: TranscriptRenderBuffer? {
@@ -64,13 +78,23 @@ private struct PreparationContext: Equatable {
 }
 
 @MainActor public final class TranscriptRenderBuffer {
-    static let parkedLimit = 10
-    static let visibleLimit = parkedLimit + 3
+    @MainActor @Observable final class Window {
+        var ids: Set<String> = []
+    }
+    let window = Window()
+    #if os(iOS)
+    weak var parkingView: UIView?
+    #else
+    weak var parkingView: NSView?
+    #endif
+    func attachParkedPages() {
+        guard let parkingView else { return }
+        for host in parked.values {
+            if let web = host.view, web.superview !== parkingView { parkingView.addSubview(web) }
+        }
+    }
     private var generation = UUID()
-    private var eligible: Set<String> = []
     private var parked: [IslandSlot:IslandController] = [:]
-    // Preserve interaction state ahead of speculative documents when the window is full.
-    private var lastViewed: [IslandSlot] = []
     private var checkedOut: [IslandSlot:UUID] = [:]
     private struct Assets {
         var item: TranscriptRenderItem
@@ -88,8 +112,6 @@ private struct PreparationContext: Equatable {
 
     func checkout(_ slot: IslandSlot) -> IslandController {
         let host = parked.removeValue(forKey: slot) ?? IslandController()
-        lastViewed.removeAll { $0 == slot }
-        IslandPool.shared.attach(host.id)
         checkedOut[slot] = host.id
         return host
     }
@@ -97,33 +119,28 @@ private struct PreparationContext: Equatable {
     func checkin(_ host: IslandController, at slot: IslandSlot) {
         guard checkedOut[slot] == host.id else { host.unmount(); return }
         checkedOut[slot] = nil
-        guard eligible.contains(slot.message), host.view != nil, !host.failed
+        guard window.ids.contains(slot.message), host.view != nil, !host.failed
         else { host.unmount(); return }
-        if parked.count >= Self.parkedLimit,
-           let victim = parked.keys.first(where: { !lastViewed.contains($0) }) ?? lastViewed.first {
-            discard(victim)
-        }
-        lastViewed.removeAll { $0 == slot }
-        lastViewed.append(slot)
         park(host, at:slot)
     }
 
     private func park(_ host: IslandController, at slot: IslandSlot) {
         parked[slot] = host
-        host.view?.setAllMediaPlaybackSuspended(true)
-        IslandPool.shared.park(host.id) { [weak self] in self?.discard(slot) }
+        if let parkingView, let web = host.view {
+            web.autoresizingMask = []
+            parkingView.addSubview(web)
+        }
     }
 
     private func discard(_ slot: IslandSlot) {
-        lastViewed.removeAll { $0 == slot }
         parked.removeValue(forKey:slot)?.unmount()
     }
 
     func clear() {
         generation = UUID()
-        eligible.removeAll()
+        window.ids.removeAll()
         for host in parked.values { host.unmount() }
-        parked.removeAll(); lastViewed.removeAll(); assets.removeAll(); images.removeAll(); attemptedImages.removeAll(); context = nil
+        parked.removeAll(); assets.removeAll(); images.removeAll(); attemptedImages.removeAll(); context = nil
         // Visible hosts remain owned by their rows until checkin.
     }
 
@@ -134,15 +151,23 @@ private struct PreparationContext: Equatable {
     }
 
     fileprivate func prepare(_ items: [TranscriptRenderItem], context next: PreparationContext, memory: TranscriptLayoutMemory?) async {
-        if context != next { clear(); context = next }
+        // A keyboard/width change should resize a live document, not restart it.
+        var previous = context
+        previous?.width = next.width
+        if previous != next { clear() }
+        if context?.width != next.width {
+            for host in parked.values { host.view?.frame.size.width = next.width }
+        }
+        context = next
         let session = generation
         func current() -> Bool { !Task.isCancelled && generation == session }
-        eligible = Set(items.map(\.id))
+        let eligible = Set(items.map(\.id))
+        if window.ids != eligible { window.ids = eligible }
         assets = assets.filter { eligible.contains($0.key) }
         images = images.filter { eligible.contains($0.key.message) && $0.value.expires > Date() }
         for key in Array(parked.keys) where !eligible.contains(key.message) { discard(key) }
 
-        for item in items where assets[item.id]?.item != item {
+        for item in items where assets[item.id] != nil && assets[item.id]?.item != item {
             images = images.filter { $0.key.message != item.id }
             attemptedImages = attemptedImages.filter { $0.message != item.id }
             for slot in Array(parked.keys) where slot.message == item.id { discard(slot) }
@@ -181,25 +206,18 @@ private struct PreparationContext: Equatable {
         }
         guard current() else { return }
 
-        // Resolve priority after the asynchronous parse pass, using the latest row leases.
-        var wanted = Set(lastViewed)
+        // Budget speculative work per message. One card-heavy reply must not evict
+        // the next ten replies; documents the reader already visited stay live within the window.
         for item in items {
-            for (slot,html) in assets[item.id]?.islands ?? [] where checkedOut[slot] == nil {
-                if !wanted.contains(slot) {
-                    guard wanted.count < Self.parkedLimit else { continue }
-                    wanted.insert(slot)
-                }
-                guard parked[slot] == nil else { continue }
-                if parked.count >= Self.parkedLimit, let victim = parked.keys.first(where: { !wanted.contains($0) }) {
-                    discard(victim)
-                }
+            for (slot,html) in (assets[item.id]?.islands ?? []).prefix(2) where checkedOut[slot] == nil {
+                guard parked[slot]?.view == nil else { continue }
                 let host = IslandController()
                 let variant = String(next.shell.hashValue)
                 host.remember = { [weak memory] height,width in
                     memory?.rememberIslandHeight(height,messageID:slot.message,source:html,width:width,variant:variant)
                 }
                 host.mount(next.shell,source:html,streaming:false,media:next.options.media,stickers:next.stickers,
-                           owner:next.owner,speculative:true,initialWidth:next.width)
+                           owner:next.owner,transcript:true,initialWidth:next.width)
                 if host.view != nil { park(host, at:slot) }
             }
         }
@@ -219,8 +237,9 @@ private struct PreparationContext: Equatable {
         for key in candidates where !attemptedImages.contains(key) {
             guard current() else { return }
             // A slow photo cannot delay another card's HTML or Markdown.
-            guard let url = await StickerResolver.shared.url(key.source,in:next.stickers), MessageMedia.isSafe(url.absoluteString),
-                  current(), let reply = try? await RemoteImageStore.shared.resource(url,owner:next.owner), current()
+            guard let reply = try? await StickerResolver.shared.loadImage(key.source,in:next.stickers,fetch: { [owner = next.owner] url in
+                try await RemoteImageStore.shared.resource(url,owner:owner)
+            }), current()
             else { if current() { attemptedImages.insert(key) }; continue }
             guard reply.expires > Date(), let raster = try? await NativeMediaLoader.shared.localImage(reply.data), current()
             else { if current() { attemptedImages.insert(key) }; continue }
@@ -270,7 +289,8 @@ public struct TranscriptPreloader: View {
         let request = Request(items:items, context:.init(options:options,shell:HTMLIslandPolicy.shell(options:options,environment:environment),
                               dark:environment.colorScheme == .dark,stickers:environment.stickerContext,owner:environment.topicMediaOwner,width:width.rounded()),
                               active:environment.scenePhase == .active && width > 1)
-        Color.clear.accessibilityHidden(true).allowsHitTesting(false)
+        IslandParkingView(buffer:buffer).frame(width:1,height:1).clipped()
+            .accessibilityHidden(true).allowsHitTesting(false)
             .task(id:request) {
                 guard request.active, !request.items.isEmpty else { buffer.clear(); return }
                 await buffer.prepare(items, context:request.context,memory:memory)
@@ -281,3 +301,29 @@ public struct TranscriptPreloader: View {
             #endif
     }
 }
+
+// WebKit throttles detached documents. Keep the actual page in the foreground
+// window when List recycles a cell, at its measured width but clipped to one point.
+#if os(iOS)
+private struct IslandParkingView: UIViewRepresentable {
+    let buffer: TranscriptRenderBuffer
+    func makeUIView(context: Context) -> UIView {
+        let host = UIView()
+        host.clipsToBounds = true; host.isUserInteractionEnabled = false; host.accessibilityElementsHidden = true
+        buffer.parkingView = host; buffer.attachParkedPages()
+        return host
+    }
+    func updateUIView(_ host: UIView, context: Context) {}
+}
+#else
+private struct IslandParkingView: NSViewRepresentable {
+    let buffer: TranscriptRenderBuffer
+    func makeNSView(context: Context) -> NSView {
+        let host = NSView()
+        host.wantsLayer = true; host.layer?.masksToBounds = true
+        buffer.parkingView = host; buffer.attachParkedPages()
+        return host
+    }
+    func updateNSView(_ host: NSView, context: Context) {}
+}
+#endif

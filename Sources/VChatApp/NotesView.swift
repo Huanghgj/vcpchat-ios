@@ -82,7 +82,7 @@ struct RemoteNotesView: View {
             DisclosureGroup("日记管理员连接") {
                 TextField("用户名",text: $model.services.adminUsername)
                 SecureField("管理员密码",text: Binding(get: { password },set: { model.serviceSecrets[.adminPassword] = $0 }))
-                Button { work { if !(await model.saveServices()) { throw ClientError.server(model.error ?? "保存失败") }; notice = "连接已保存" } } label: { Text("保存连接").frame(maxWidth: .infinity,alignment: .leading).contentShape(Rectangle()) }.buttonStyle(.plain)
+                Button { work { if !(await model.saveServices(bindStickerAccount:true)) { throw ClientError.server(model.error ?? "保存失败") }; notice = "连接已保存" } } label: { Text("保存连接").frame(maxWidth: .infinity,alignment: .leading).contentShape(Rectangle()) }.buttonStyle(.plain)
             }
             Button { work { folders = try await client.folders(model.configuration,username: model.services.adminUsername,password: password); if folder.isEmpty { folder = folders.first ?? "" }; try await list() } } label: { Label("刷新文件夹",systemImage: "arrow.clockwise").frame(maxWidth: .infinity,alignment: .leading).contentShape(Rectangle()) }.buttonStyle(.plain).disabled(busy)
             Picker("文件夹",selection: $folder) { Text("选择文件夹").tag(""); ForEach(folders,id: \.self) { Text($0).tag($0) } }.onChange(of: folder) { _, _ in work { try await list() } }

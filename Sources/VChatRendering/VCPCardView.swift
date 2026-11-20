@@ -2,6 +2,7 @@ import SwiftUI
 import VChatCore
 
 struct VCPCardView: View {
+    @Environment(\.parentIsland) private var parentIsland
     var segment: VCPMarkup.Segment
     var options: RenderOptions
     @ViewBuilder var body: some View {
@@ -32,8 +33,8 @@ struct VCPCardView: View {
                 HStack { Label(entry.update ? "日记修改" : entry.title, systemImage: "book.closed").font(.headline); Spacer(); Text(closed ? entry.date : "写入中").font(.caption).foregroundStyle(.secondary) }
                 if !entry.agent.isEmpty || !entry.folder.isEmpty { Text([entry.agent.isEmpty ? "" : entry.label + "：" + entry.agent, entry.folder].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary) }
                 if entry.update {
-                    Text("原文").font(.caption).foregroundStyle(.secondary); RichMessageBody(entry.target, options: options)
-                    Divider(); Text("改为").font(.caption).foregroundStyle(.mint); RichMessageBody(entry.replacement, options: options)
+                    Text("原文").font(.caption).foregroundStyle(.secondary); RichMessageBody(entry.target, options: options).environment(\.parentIsland,parentIsland?.child("target"))
+                    Divider(); Text("改为").font(.caption).foregroundStyle(.mint); RichMessageBody(entry.replacement, options: options).environment(\.parentIsland,parentIsland?.child("replacement"))
                 } else { RichMessageBody(entry.content, options: options) }
                 if !entry.tag.isEmpty { Text(entry.tag).font(.caption).foregroundStyle(.secondary) }
             }.padding(14).background(.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))

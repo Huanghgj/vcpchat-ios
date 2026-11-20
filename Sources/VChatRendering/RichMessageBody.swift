@@ -145,22 +145,25 @@ private struct NativeBlocks: View, Equatable {
     var options: RenderOptions
     var streaming = false
     var transcriptID: String?
+    @Environment(\.parentIsland) private var parentIsland
+    static func == (lhs:Self, rhs:Self) -> Bool { lhs.blocks == rhs.blocks && lhs.options == rhs.options && lhs.streaming == rhs.streaming && lhs.transcriptID == rhs.transcriptID }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in blockView(block, index: index) }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     @ViewBuilder func blockView(_ block: RenderBlock, index: Int) -> some View {
+        let slot = transcriptID.map { IslandSlot(message:$0,index:index) } ?? parentIsland?.child(String(index))
         switch block {
-        case .html(let source): HTMLIsland(source: source, options: options,streaming: streaming, slot: transcriptID.map { IslandSlot(message: $0, index: index) })
+        case .html(let source): HTMLIsland(source: source, options: options,streaming: streaming, slot: slot)
         case .diagram(let source,let raster): VStack(alignment: .leading,spacing: 8) { NativeDiagram(source: source,raster: raster); DisclosureGroup("图表源码") { NativeCode(language: "mermaid",source: source,spans: []) } }
-        case .vcp(let segment): VCPCardView(segment: segment, options: options)
+        case .vcp(let segment): VCPCardView(segment: segment, options: options).environment(\.parentIsland,slot)
         case .literal(let text): Text(verbatim: text).modifier(MessageTextSelection())
         case .paragraph(let runs): InlineBody(runs: runs,animations: options.motion)
         case .heading(let level, let text): InlineBody(runs: text,animations: options.motion).font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
+        case .quote(let blocks): HStack(alignment: .top, spacing: 10) { RoundedRectangle(cornerRadius: 2).fill(.secondary.opacity(0.35)).frame(width: 3); NativeBlocks(blocks: blocks, options: options,streaming: streaming).environment(\.parentIsland,slot).foregroundStyle(.secondary) }.fixedSize(horizontal: false, vertical: true)
         case .list(let items, let start):
-            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming) } } }
+            VStack(alignment: .leading, spacing: 8) { ForEach(Array(items.enumerated()), id: \.offset) { index, blocks in HStack(alignment: .top, spacing: 8) { Text(start.map { "\($0 + index)." } ?? "•").foregroundStyle(.secondary); NativeBlocks(blocks: blocks, options: options,streaming: streaming).environment(\.parentIsland,slot?.child(String(index))) } } }
         case .rule: Divider()
         case .math(let source): ScrollView(.horizontal) { NativeMath(source).fixedSize().padding(.vertical, 3) }
         case .code(let language, let code, let spans): NativeCode(language: language, source: code, spans: spans)
