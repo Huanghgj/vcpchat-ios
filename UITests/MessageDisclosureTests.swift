@@ -97,6 +97,30 @@ final class MessageDisclosureTests: XCTestCase {
         XCTAssertTrue(send.waitForExistence(timeout:20))
     }
 
+    @MainActor func testServerReplySurvivesProcessLossWithoutSecondGeneration() async throws {
+        guard let base=ProcessInfo.processInfo.environment["VCHAT_REPLY_SYNC_FIXTURE"],let url=URL(string:base) else {
+            throw XCTSkip("Requires the companion plugin with its local synthetic VCP endpoint")
+        }
+        let id=UUID().uuidString, app=XCUIApplication()
+        app.launchEnvironment["VCHAT_TEST_LIVE_ENDPOINT"]=base
+        app.launchEnvironment["VCHAT_TEST_SYNC_SESSION"]=id
+        app.launchArguments=["-native.background-replies","YES","-native.server-reply-sync","YES"]
+        app.launch()
+        let send=app.buttons["发送消息"]
+        guard send.waitForExistence(timeout:20) else { XCTFail("Missing composer"); return }
+        send.tap()
+        guard app.staticTexts["首段"].waitForExistence(timeout:20) else { XCTFail("Missing live server prefix"); return }
+        app.terminate()
+        let (body,_)=try await URLSession.shared.data(from:url.appendingPathComponent("release").appendingPathComponent(id))
+        XCTAssertEqual(String(decoding:body,as:UTF8.self),"1")
+        app.launch()
+        guard app.staticTexts["首段后台完成"].waitForExistence(timeout:25) else { XCTFail("The original reply did not recover"); return }
+        XCTAssertTrue(send.waitForExistence(timeout:15))
+        XCTAssertEqual(app.staticTexts["首段后台完成"].count,1)
+        let (count,_)=try await URLSession.shared.data(from:url.appendingPathComponent("count").appendingPathComponent(id))
+        XCTAssertEqual(String(decoding:count,as:UTF8.self),"1")
+    }
+
     @MainActor func testScrolledMessageDoesNotPaintBehindChatHeader() throws {
         let app = XCUIApplication()
         app.launchEnvironment["VCHAT_TEST_DISCLOSURE_MESSAGE"] = #"<div id="vcp-root" style="height:2100px;background:#ff00ff">色带</div>"#

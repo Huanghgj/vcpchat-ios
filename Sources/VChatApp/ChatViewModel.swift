@@ -40,6 +40,7 @@ import VChatRendering
     var attachments: [ChatAttachment] = []
     var locationPreference: LocationMessagePreference = .automatic
     var busy = false
+    var serverOwnsReply = false
     var receivesInBackground = false
     @ObservationIgnored var replyRuntimeID: String?
     @ObservationIgnored var finishedSpeakerBytes = 0
@@ -161,8 +162,10 @@ struct TopicDraft: Codable, Sendable {
         await ReplyPresentation.update(id: id, receivedBytes: bytes)
     }
     var requestedReplyTopic: String?
+    private var prefersServerReplies: Bool { UserDefaults.standard.bool(forKey:ServerReplyClient.preference) }
     private var prefersBackgroundReplies: Bool { UserDefaults.standard.bool(forKey: ReplyPresentation.modeKey) }
     #else
+    private var prefersServerReplies: Bool { false }
     private var prefersBackgroundReplies: Bool { false }
     #endif
     @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -217,14 +220,15 @@ struct TopicDraft: Codable, Sendable {
         if let endpoint = ProcessInfo.processInfo.environment["VCHAT_TEST_LIVE_ENDPOINT"],
            let url = URL(string:endpoint), url.scheme == "http", url.host == "localhost" {
             do {
-                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                let testID=ProcessInfo.processInfo.environment["VCHAT_TEST_SYNC_SESSION"].flatMap(UUID.init(uuidString:))
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent((testID ?? UUID()).uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 let database = try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
-                let agent = VCPAgent(id:"fixture",name:"测试"), topic = ChatTopic(ownerId:"fixture",title:"流式接收测试")
+                let agent = VCPAgent(id:"fixture",name:"测试"), topic = ChatTopic(id:"fixture-topic",ownerId:"fixture",title:"流式接收测试")
                 try await database.put(topic,kind:"topic",id:topic.id)
                 store = database; agents = [agent]; topics = [topic]
-                apiKey = "fixture"; configuration = .init(server:endpoint,model:"fixture")
-                let room = ChatRoom(id:topic.id,messages:[])
+                apiKey = "fixture"; configuration = .init(server:endpoint,model:testID?.uuidString ?? "fixture")
+                let room = ChatRoom(id:topic.id,messages:try await database.messages(topicID:topic.id))
                 room.draft = "本机测试"; rooms[room.id] = room; activeTopicID = room.id
                 try await restoreBackgroundReplies(store:database,root:root)
                 renderOptions.motion = false; requestedReplyTopic = topic.id
@@ -529,7 +533,7 @@ struct TopicDraft: Codable, Sendable {
         let id = UUID().uuidString
         room.backgroundJobID = id
         #if os(iOS)
-        guard room.replyRuntimeID == nil else { return } // one user gesture can start a group turn
+        guard !room.serverOwnsReply, room.replyRuntimeID == nil else { return } // one user gesture can start a group turn
         room.replyRuntimeID = id; room.finishedSpeakerBytes = 0
         // Only a send/regenerate gesture creates a new generation. An expiring
         // system task must never restart the model or execute its tools again.
@@ -562,7 +566,7 @@ struct TopicDraft: Codable, Sendable {
         guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return }
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
-        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
+        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.serverOwnsReply = room.receivesInBackground && prefersServerReplies; room.cancellation = nil; room.error = nil
         if room.receivesInBackground && !speakers.isEmpty { reserveReply(in:room) }
         room.generation = Task {
             var currentReply: MessageViewModel?
@@ -647,7 +651,7 @@ struct TopicDraft: Codable, Sendable {
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         let prefix = continuing ? message.text : "", reasoning = continuing ? message.reasoning : ""
         let history = (continuing ? room.messages : Array(room.messages.dropLast())).map(\.record)
-        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
+        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.serverOwnsReply = room.receivesInBackground && prefersServerReplies; room.cancellation = nil; room.error = nil
         if room.receivesInBackground { reserveReply(in:room) }
         room.generation = Task {
             defer { finishReplyTurn(in:room,success:message.status == "complete" && room.error == nil); room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }

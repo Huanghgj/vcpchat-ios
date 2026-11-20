@@ -24,7 +24,7 @@ import WidgetKit
             } compactLeading: {
                 Image(systemName: context.state.symbol).foregroundStyle(.mint).accessibilityLabel(context.state.label)
             } compactTrailing: {
-                Text(context.state.amount ?? (context.state.phase == .waiting ? "AI" : "VChat")).font(.caption2).monospacedDigit()
+                Text("AI").font(.caption2.weight(.medium)).accessibilityLabel(context.state.label)
             } minimal: {
                 Image(systemName: context.state.symbol).foregroundStyle(.mint).accessibilityLabel(context.state.label)
             }.widgetURL(context.attributes.url)

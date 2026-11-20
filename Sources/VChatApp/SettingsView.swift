@@ -189,6 +189,7 @@ private struct RenderingSettings: View {
 private struct BackgroundReplySettings: View {
     @AppStorage(ReplyPresentation.modeKey) private var enabled = false
     @AppStorage(ReplyPresentation.islandKey) private var island = true
+    @AppStorage(ServerReplyClient.preference) private var serverSync = false
     @AppStorage(ReplyRuntime.noticeKey) private var runtimeNotice = ""
     @State private var permission: UNAuthorizationStatus = .notDetermined
     @State private var notice = ""
@@ -199,9 +200,10 @@ private struct BackgroundReplySettings: View {
         Form {
             Section {
                 Toggle("后台收回复", isOn: $enabled)
-                if enabled && !runtimeNotice.isEmpty { Text(runtimeNotice).font(.caption).foregroundStyle(.secondary) }
+                if enabled { Toggle("使用 VCP 回复续传插件",isOn:$serverSync) }
+                if enabled && !serverSync && !runtimeNotice.isEmpty { Text(runtimeNotice).font(.caption).foregroundStyle(.secondary) }
             } footer: {
-                Text("前台随服务返回显示回复；锁屏或切换 App 后继续接收。回到聊天会补上已经收到的内容。iOS 26 及以上会申请持续后台运行；较早系统挂起 App 时，进度可能暂停。")
+                Text(enabled && serverSync ? "请先在自己的 VCP 安装 VChatReplySync。服务器继续生成，手机断线或重开后会补齐这条回复。未安装不会发起普通聊天请求。" : "前台随服务返回显示回复；锁屏或切换 App 后继续接收。回到聊天会补上已经收到的内容。iOS 26 及以上会申请持续后台运行；较早系统挂起 App 时，进度可能暂停。")
             }
             Section {
                 Toggle("在锁屏与灵动岛显示进度", isOn: $island)
