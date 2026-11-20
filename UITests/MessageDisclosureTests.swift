@@ -63,7 +63,8 @@ final class MessageDisclosureTests: XCTestCase {
         XCTAssertTrue(app.staticTexts["小雨"].exists); XCTAssertTrue(app.staticTexts["九点"].exists)
     }
     @MainActor func testHomeDuringStreamThenReturnBeforeFinish() async throws {
-        continueAfterFailure = false
+        // Use explicit guards instead of unwinding an async XCTest via an ObjC exception.
+        continueAfterFailure = true
         guard let endpoint = ProcessInfo.processInfo.environment["VCHAT_STREAM_FIXTURE"],
               let url = URL(string:endpoint)?.appendingPathComponent("ui") else { throw XCTSkip("Requires the gated loopback server") }
         let app = XCUIApplication()
@@ -75,7 +76,14 @@ final class MessageDisclosureTests: XCTestCase {
         send.tap()
         guard app.staticTexts["首段"].waitForExistence(timeout:20) else { XCTFail("First chunk was not visible before completion"); return }
         XCUIDevice.shared.press(.home)
-        XCTAssertNotEqual(app.state,.runningForeground)
+        func hasLeftChat() -> Bool { app.state == .runningBackground || app.state == .runningBackgroundSuspended }
+        if !hasLeftChat() && !app.wait(for:.runningBackground,timeout:5) && !hasLeftChat() {
+            // iOS can spend the first press dismissing a system presentation.
+            // Explicitly switch apps and require actual background state.
+            XCUIApplication(bundleIdentifier:"com.apple.Preferences").activate()
+        }
+        guard hasLeftChat() || app.wait(for:.runningBackground,timeout:15) || hasLeftChat()
+        else { XCTFail("The chat app never entered the background"); return }
         // The server emits nothing else until *after* the old background lease
         // would have ended. It still cannot finish until after we return.
         try await Task.sleep(for:.seconds(32))
