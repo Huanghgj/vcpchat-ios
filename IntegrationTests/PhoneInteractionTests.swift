@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UserNotifications
 import WebKit
 import XCTest
 import SQLite3
@@ -559,6 +560,15 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(VCPMarkup.parse(batch("",id:receiptID)),[])
         let other = "<<<[ROLE_DIVIDE_USER]>>>你好<<<[END_ROLE_DIVIDE_USER]>>>"
         XCTAssertEqual(VCPMarkup.parse(other),[.divider("user",false),.text("你好"),.divider("user",true)])
+    }
+
+    func testResultBodyKeepsStatusLikeLinesInsidePluginOutput() {
+        let source = "- 工具名称: 天气\n- 执行状态: 成功\n- 返回内容: 详细记录\n- 执行状态: 内部记录失败\n- Result: 原始值"
+        let result = VCPMarkup.resultFields(source)
+        XCTAssertEqual(result.tool, "天气"); XCTAssertEqual(result.status, "成功")
+        XCTAssertEqual(result.content, "详细记录\n- 执行状态: 内部记录失败\n- Result: 原始值")
+        let unlabelled = VCPMarkup.resultFields("- 工具名称: 天气\n- 执行状态: 成功\n无字段名的返回正文")
+        XCTAssertEqual(unlabelled.content, "无字段名的返回正文")
     }
 
     func testDocumentedBatchInMarkdownIsLiteral() async throws {
@@ -1508,5 +1518,113 @@ private struct NearbyCardViews: View {
         }
         .environment(\.transcriptRenderBuffer,state.buffer)
         .environment(\.scenePhase,.active)
+    }
+}
+
+private final class CompletedReplyFixture: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard request.httpMethod == "POST", request.url?.path == "/v1/chatvcp/completions",
+              request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture",
+              request.value(forHTTPHeaderField: "Accept") == "application/json" else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"choices":[{"message":{"content":"回复"#.utf8))
+        client?.urlProtocol(self, didLoad: Data(#"正文","reasoning_content":"思路"}}]}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+extension PhoneInteractionTests {
+    @MainActor func testBackgroundReplySurvivesLeaseExpiryAndCommitsExactlyOnce() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let topic = try await addMediaTopic(db)
+        let user = StoredMessage(topicID: topic.id, role: "user", content: "test", status: "pending")
+        let answer = StoredMessage(topicID: topic.id, role: "assistant", content: "原文", reasoning: "已有", status: "connecting")
+        try await db.enqueue(user); try await db.save(answer)
+        let room = ChatRoom(id: topic.id, messages: [user, answer])
+        let model = ChatViewModel()
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [CompletedReplyFixture.self]
+        model.replyTransfers = BackgroundReplyTransfers(configuration: config)
+        model.store = db; model.rooms[room.id] = room; room.busy = true; room.receivesInBackground = true
+        try await model.restoreBackgroundReplies(store: db, root: root)
+
+        let request = ChatRequest(configuration: .init(server: "https://fixture.invalid", model: "test", endpointMode: .vcpTools),
+            apiKey: "fixture", messages: [.init(role: "user", content: "test")], contextTokenLimit: 100, maxOutputTokens: 12)
+        let job = BackgroundReplyJob(messageID: answer.id, topicID: topic.id, userID: user.id)
+        let ticket = try await model.replyTransfers.submit(job, request: request, room: room, store: db)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ticket.directory.appendingPathComponent("post"))) as? [String: Any])
+        XCTAssertEqual(payload["stream"] as? Bool, false); XCTAssertEqual(payload["contextTokenLimit"] as? Int, 100)
+        XCTAssertEqual(payload["max_tokens"] as? Int, 12)
+        await model.interruptForBackground()
+        XCTAssertFalse(room.cancelled)
+        await model.collectBackgroundReply(job, ticket: ticket, room: room, store: db)
+        XCTAssertEqual(room.messages.last?.text, "原文回复正文"); XCTAssertEqual(room.messages.last?.reasoning, "已有思路")
+        XCTAssertEqual(room.messages.first?.status, "complete")
+        let duplicate = try await db.finishBackgroundReply(job, reply: nil)
+        let pending = try await db.pending()
+        XCTAssertNil(duplicate); XCTAssertEqual(pending, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ticket.directory.path))
+    }
+
+    @MainActor func testStoppedTransferCannotCompleteRegeneratedMessage() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let user = StoredMessage(topicID: "topic", role: "user", content: "我", status: "pending")
+        let answer = StoredMessage(topicID: user.topicID, role: "assistant", content: "原文", status: "connecting")
+        try await db.enqueue(user); try await db.save(answer)
+        let old = BackgroundReplyJob(messageID: answer.id, topicID: user.topicID, userID: user.id)
+        try await db.registerBackgroundReply(old)
+        let stopped = try await db.finishBackgroundReply(old, reply: nil, stopped: true)
+        XCTAssertEqual(stopped?.status, "stopped"); XCTAssertEqual(stopped?.content, "原文")
+        let next = BackgroundReplyJob(messageID: answer.id, topicID: user.topicID, userID: user.id)
+        try await db.registerBackgroundReply(next)
+        let late = try FinishedReply(data: Data(#"{"choices":[{"message":{"content":"过期结果"}}]}"#.utf8))
+        let ignored = try await db.finishBackgroundReply(old, reply: late)
+        let pending = try await db.pending(), jobs = try await db.backgroundReplies()
+        XCTAssertNil(ignored); XCTAssertEqual(pending, 1); XCTAssertEqual(jobs.map(\.id), [next.id])
+    }
+
+    @MainActor func testRelaunchCollectsDurableReceiptAndInterruptsMissingTransfer() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let received = StoredMessage(topicID: "topic a/🪴", role: "assistant", content: "", status: "connecting")
+        let orphan = StoredMessage(topicID: "another", role: "assistant", content: "保留", status: "connecting")
+        let stream = StoredMessage(topicID: "stream", role: "assistant", content: "流", status: "streaming")
+        for message in [received, orphan, stream] { try await db.save(message) }
+        let job = BackgroundReplyJob(messageID: received.id, topicID: received.topicID, userID: nil)
+        try await db.registerBackgroundReply(job)
+        try await db.registerBackgroundReply(.init(messageID: orphan.id, topicID: orphan.topicID, userID: nil))
+        let dir = root.appendingPathComponent("ReplyTransfers").appendingPathComponent(job.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(#"{"choices":[{"message":{"content":"完成"}}]}"#.utf8).write(to: dir.appendingPathComponent("response"))
+        try JSONEncoder().encode(BackgroundReplyTransfers.Receipt()).write(to: dir.appendingPathComponent("receipt"))
+        try await db.recoverInterrupted()
+        let previous = try await db.messages(topicID: received.topicID)
+        XCTAssertEqual(previous.first?.status, "connecting")
+        let model = ChatViewModel(); model.replyTransfers = BackgroundReplyTransfers(configuration: .ephemeral)
+        try await model.restoreBackgroundReplies(store: db, root: root)
+        for room in Array(model.rooms.values) { await room.generation?.value }
+        let all = try await db.messages()
+        XCTAssertEqual(all.first { $0.id == received.id }?.content, "完成")
+        XCTAssertEqual(all.first { $0.id == orphan.id }?.status, "interrupted")
+        XCTAssertEqual(all.first { $0.id == orphan.id }?.content, "保留")
+        XCTAssertEqual(all.first { $0.id == stream.id }?.status, "interrupted")
+        let outstanding = try await db.backgroundReplies()
+        XCTAssertTrue(outstanding.isEmpty)
+
+        let link = try XCTUnwrap(ReplyActivityAttributes(jobID: job.id, topicID: job.topicID, started: Date()).url)
+        XCTAssertEqual(ReplyActivityAttributes.topic(in: link), received.topicID)
+        let notification = ReplyPresentation.notification(for: job)
+        XCTAssertEqual(notification.content.userInfo["topicID"] as? String, received.topicID)
+        XCTAssertEqual(notification.identifier, job.id); XCTAssertEqual(notification.content.threadIdentifier, received.topicID)
+        XCTAssertEqual(notification.content.body, "轻点查看这条回复。")
+        let plugins = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
+        XCTAssertNotNil(Bundle(url: plugins.appendingPathComponent("ReplyActivity.appex")))
     }
 }

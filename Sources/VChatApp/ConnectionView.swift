@@ -35,6 +35,7 @@ struct ConnectionView: View {
                         }.padding(18).workspaceGlass(palette,radius: 20)
                         VStack(alignment: .leading,spacing: 24) {
                             WorkspaceField(title: "接口",palette: palette) { Picker("接口模式",selection: $model.configuration.endpointMode) { ForEach(EndpointMode.allCases,id: \.self) { Text($0.title).tag($0) } }.labelsHidden().frame(maxWidth: .infinity,alignment: .leading) }
+                            Text(model.configuration.endpointMode == .vcpTools ? "VCP 工具模式会请求工具结果正文，收到后可在消息中展开。" : "如果 VCP 只返回工具摘要，可切换到「VCP 工具模式」查看后续调用的详细结果。").font(.caption).foregroundStyle(palette.muted)
                             WorkspaceModelField(model: model,selection: $model.configuration.model,title: "默认模型",prompt: "模型 ID")
                             Toggle(isOn: $model.configuration.sendTemperature) { VStack(alignment: .leading,spacing: 4) { Text("发送 Temperature").font(.system(size: 15,weight: .semibold)); Text("部分模型不接受此参数").font(.system(size: 13)).foregroundStyle(palette.muted) } }.toggleStyle(.switch).accessibilityLabel("发送 Temperature")
                             if model.configuration.sendTemperature { LabeledContent("Temperature",value: model.configuration.temperature.formatted(.number.precision(.fractionLength(2)))); Slider(value: $model.configuration.temperature,in: 0...2) }

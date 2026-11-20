@@ -172,14 +172,26 @@ public enum VCPMarkup {
     public static func resultFields(_ source: String) -> Result {
         let textKeys = ["返回内容", "内容", "Result", "返回结果", "output"]
         let known = ["工具名称", "执行状态", "命令", "参数", "可访问URL", "url", "image"] + textKeys
-        var fields: [Field] = []
-        for line in source.components(separatedBy: .newlines) {
-            if let m = match("^\\s*-?\\s*([^:：\\n]{1,24}?)\\s*[:：]\\s?(.*)$", line), known.contains(m[1].trimmingCharacters(in: .whitespaces)) || match("^\\s*-\\s", line) != nil { fields.append(Field(key: m[1].trimmingCharacters(in: .whitespaces), value: m[2])) }
-            else if !fields.isEmpty { fields[fields.count - 1].value += "\n" + line }
+        var fields: [Field] = [], content: [String] = []
+        var inOutput = false
+        for line in source.replacingOccurrences(of:"\r\n",with:"\n").components(separatedBy:"\n") {
+            // VCP puts the plugin's return value last. Its Markdown bullets, JSON
+            // and status-looking lines are payload, not a second set of headers.
+            if inOutput { content.append(line); continue }
+            if let m = match("^\\s*-?\\s*([^:：\\n]{1,24}?)\\s*[:：]\\s?(.*)$", line) {
+                let key = m[1].trimmingCharacters(in:.whitespaces)
+                if textKeys.contains(key) { inOutput = true; content.append(m[2]); continue }
+                if known.contains(key) || match("^\\s*-\\s", line) != nil {
+                    fields.append(Field(key:key,value:m[2])); continue
+                }
+            }
+            if let last = fields.last, !["工具名称","执行状态"].contains(last.key) {
+                fields[fields.count - 1].value += "\n" + line
+            } else { content.append(line) }
         }
         fields = fields.map { Field(key: $0.key, value: $0.value.trimmingCharacters(in: .whitespacesAndNewlines)) }
         let status = fields.first { $0.key == "执行状态" }?.value ?? ""
         let ok: Bool? = status.isEmpty ? nil : (match("❌|error|fail|失败", status, options: .caseInsensitive) != nil ? false : match("✅|success|成功", status, options: .caseInsensitive) != nil)
-        return Result(tool: fields.first { $0.key == "工具名称" }?.value ?? "", status: status, ok: ok, fields: fields.filter { !(["工具名称", "执行状态"] + textKeys).contains($0.key) }, content: fields.first { textKeys.contains($0.key) }?.value ?? (fields.isEmpty ? source : ""))
+        return Result(tool: fields.first { $0.key == "工具名称" }?.value ?? "", status: status, ok: ok, fields: fields.filter { !["工具名称", "执行状态"].contains($0.key) }, content: content.joined(separator:"\n").trimmingCharacters(in:.whitespacesAndNewlines))
     }
 }

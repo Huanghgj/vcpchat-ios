@@ -40,6 +40,8 @@ import VChatRendering
     var attachments: [ChatAttachment] = []
     var locationPreference: LocationMessagePreference = .automatic
     var busy = false
+    var receivesInBackground = false
+    var backgroundJobID: String?
     var cancellation: SessionState?
     var cancelled: Bool { cancellation != nil }
     var connection = ""
@@ -150,6 +152,14 @@ struct TopicDraft: Codable, Sendable {
     @ObservationIgnored let network = SessionActor()
     @ObservationIgnored let vault: CredentialVault
     var credentialsInMemory: Bool { vault.persistence == .session }
+    #if os(iOS)
+    @ObservationIgnored var replyTransfers = BackgroundReplyTransfers()
+    var requestedReplyTopic: String?
+    private var prefersBackgroundReplies: Bool { UserDefaults.standard.bool(forKey: ReplyPresentation.modeKey) }
+    #else
+    private var prefersBackgroundReplies: Bool { false }
+    #endif
+    @ObservationIgnored private var loadTask: Task<Void, Never>?
     @ObservationIgnored var store: ChatStore?
     @ObservationIgnored private var openingID: UUID?
     var room: ChatRoom? { rooms[activeTopicID] }
@@ -189,7 +199,24 @@ struct TopicDraft: Codable, Sendable {
         }
     }
     func load() async {
+        if let loadTask { await loadTask.value; return }
         guard store == nil else { return }
+        let task = Task { await loadDatabase() }
+        loadTask = task
+        await task.value
+        loadTask = nil
+    }
+    private func loadDatabase() async {
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+        if let sample = ProcessInfo.processInfo.environment["VCHAT_TEST_DISCLOSURE_MESSAGE"] {
+            let topic = ChatTopic(id:"test-disclosures",ownerId:"assistant")
+            let message = StoredMessage(topicID:topic.id,role:"assistant",content:sample,reasoning:"这段单独的推理")
+            agents = [VCPAgent(id:"assistant",name:"助手")]; topics = [topic]
+            rooms[topic.id] = ChatRoom(id:topic.id,messages:[message]); activeTopicID = topic.id
+            renderOptions.motion = false; requestedReplyTopic = topic.id; loading = false
+            return
+        }
+        #endif
         do {
             let root: URL
             if let isolated = ProcessInfo.processInfo.environment["VCHAT_DATA_DIR"] { root = URL(fileURLWithPath: isolated) }
@@ -229,13 +256,21 @@ struct TopicDraft: Codable, Sendable {
             }
             let previous = UserDefaults.standard.string(forKey: "native.active-topic") ?? "legacy"
             await openTopic(topics.first { $0.id == previous } ?? topics[0])
+            #if os(iOS)
+            try await restoreBackgroundReplies(store: database, root: root)
+            #endif
             await activity.load(store: database)
             await loadCatalog()
             loading = false
             credentialsLocked = true
             await loadCredentials(allowInteraction: false)
             prefetchLocation()
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = error.localizedDescription
+            #if os(iOS)
+            replyTransfers.abandonWake()
+            #endif
+        }
         loading = false
     }
     func saveServices(bindStickerAccount: Bool = false) async -> Bool {
@@ -388,7 +423,7 @@ struct TopicDraft: Codable, Sendable {
         guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return }
         do {
             rooms[topic.id]?.cancellation = .stopped
-            await rooms[topic.id]?.session.stop(); await rooms[topic.id]?.generation?.value; rooms[topic.id]?.draftSave?.cancel()
+            if let room = rooms[topic.id] { await stopGeneration(in: room) }; await rooms[topic.id]?.generation?.value; rooms[topic.id]?.draftSave?.cancel()
             try await store?.removeTopic(topic.id); rooms.removeValue(forKey: topic.id); topics.removeAll { $0.id == topic.id }
             if activeTopicID == topic.id {
                 if let next = topics.first { await openTopic(next) }
@@ -476,7 +511,7 @@ struct TopicDraft: Codable, Sendable {
         guard !apiKey.isEmpty else { error = "请先设置聊天 API Key"; return }
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
-        room.busy = true; room.cancellation = nil; room.error = nil
+        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
         room.generation = Task {
             var currentReply: MessageViewModel?
             do {
@@ -527,6 +562,15 @@ struct TopicDraft: Codable, Sendable {
             assistant.status = cancellation.rawValue; room.connection = cancellation == .stopped ? "已停止" : "已中断"
             try await store.save(assistant.record); return
         }
+        #if os(iOS)
+        if room.receivesInBackground {
+            let job = BackgroundReplyJob(messageID: assistant.id, topicID: room.id, userID: acceptedUser)
+            room.connection = "正在等待后台回复"
+            let ticket = try await replyTransfers.submit(job, request: request, room: room, store: store)
+            await collectBackgroundReply(job, ticket: ticket, room: room, store: store)
+            return
+        }
+        #endif
         var lastSaved = ContinuousClock.now, accepted = false
         for try await update in try await room.session.stream(request, prefix: prefix, reasoningPrefix: reasoningPrefix) {
             assistant.text = update.text; assistant.reasoning = update.reasoning; assistant.status = update.state.rawValue
@@ -549,7 +593,7 @@ struct TopicDraft: Codable, Sendable {
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         let prefix = continuing ? message.text : "", reasoning = continuing ? message.reasoning : ""
         let history = (continuing ? room.messages : Array(room.messages.dropLast())).map(\.record)
-        room.busy = true; room.cancellation = nil; room.error = nil
+        room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
         room.generation = Task {
             defer { room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
             do {
@@ -591,7 +635,17 @@ struct TopicDraft: Codable, Sendable {
             return true
         } catch { self.error = error.localizedDescription; return false }
     }
-    func stop(background: Bool = false) async { room?.cancellation = background ? .interrupted : .stopped; await room?.session.stop(interrupted: background) }
+    func stop(background: Bool = false) async {
+        guard let room else { return }
+        room.cancellation = background ? .interrupted : .stopped
+        await stopGeneration(in: room)
+    }
+    private func stopGeneration(in room: ChatRoom) async {
+        #if os(iOS)
+        if let id = room.backgroundJobID { replyTransfers.cancel(id) }
+        #endif
+        await room.session.stop(interrupted: room.cancellation == .interrupted)
+    }
     func enterBackground() async {
         backgrounded = true
         await flushDraft(); guard !Task.isCancelled else { return }
@@ -599,7 +653,7 @@ struct TopicDraft: Codable, Sendable {
         await activity.pause(); await fileNode.pause()
     }
     func interruptForBackground() async {
-        let targets = Array(rooms.values).filter { $0.busy }
+        let targets = Array(rooms.values).filter { $0.busy && !$0.receivesInBackground }
         for room in targets { room.cancellation = .interrupted; await room.session.stop(interrupted: true) }
         for room in targets {
             await room.generation?.value

@@ -283,7 +283,7 @@ private struct NativeMessageRow: View {
                     VStack(alignment: .leading,spacing: 12) {
                         if !message.attachments.isEmpty { AttachmentStrip(attachments: message.attachments) }
                         if let notice = message.syncNotice { Label(notice,systemImage: "arrow.triangle.2.circlepath").font(.caption).foregroundStyle(palette.muted) }
-                        if !message.reasoning.isEmpty { DisclosureGroup("思考过程") { Text(verbatim:message.reasoning).font(.callout).foregroundStyle(palette.muted).lineLimit(nil).fixedSize(horizontal:false,vertical:true).textSelection(.disabled) } }
+                        if !message.reasoning.isEmpty { MessageDisclosure(kind:"reasoning",title:"思考过程",motion:motion) { Label("思考过程",systemImage:"sparkles").font(.callout.weight(.semibold)) } content: { Text(verbatim:message.reasoning).font(.callout).foregroundStyle(palette.muted).lineLimit(nil).fixedSize(horizontal:false,vertical:true).textSelection(.disabled) } }
                         RichMessageBody(message.text.isEmpty && message.status == "connecting" ? "正在连接…" : message.text,options: model.renderOptions,streaming: streaming,rules: model.displayRules(for: message),role: message.role,depth: model.rooms[message.topicID]?.depths[message.id] ?? 0,expandsToFill: message.role != "user", transcriptRow: true).font(.system(size: 16)).lineSpacing(5)
                     }.environment(\.messageTextSelectionEnabled,false)
                     .environment(\.topicMediaOwner,model.rooms[message.topicID]?.mediaScope)

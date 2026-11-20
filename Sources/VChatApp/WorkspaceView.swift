@@ -61,6 +61,17 @@ struct WorkspaceView: View {
         .task(id: DirectoryRequest(origin:model.currentImageOrigin,ready:!model.loading && !model.credentialsLocked,revision:model.stickerRefreshRevision)) {
             await model.loadStickerDirectory()
         }
+        #if os(iOS)
+        .task(id: model.loading ? nil : model.requestedReplyTopic) {
+            guard !model.loading, let id = model.requestedReplyTopic else { return }
+            if let topic = model.topics.first(where: { $0.id == id }) {
+                await model.openTopic(topic)
+                guard !Task.isCancelled, model.activeTopicID == id else { return }
+                move { searching = false; activityOpen = false; tab = .chats; chatPath = [id] }
+            }
+            model.requestedReplyTopic = nil
+        }
+        #endif
         .tint(palette.accent).foregroundStyle(palette.ink)
         .sheet(item: $editing) { AgentEditor(model: model,agent: $0) }
         .sheet(item: $editingGroup) { GroupEditor(model: model,group: $0) }
