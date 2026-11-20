@@ -26,11 +26,16 @@ import VChatCore
                                dismissalPolicy: phase == .stopped ? .immediate : .after(Date().addingTimeInterval(15)))
         }
     }
+    // UNNotificationSettings itself isn't Sendable on the iOS 17/18 SDK.
+    nonisolated static func authorizationStatus() async -> UNAuthorizationStatus {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return settings.authorizationStatus
+    }
     static func notify(_ job: BackgroundReplyJob) async {
         guard UIApplication.shared.applicationState != .active else { return }
         let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-        guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus),
+        let status = await authorizationStatus()
+        guard [.authorized, .provisional, .ephemeral].contains(status),
               UIApplication.shared.applicationState != .active else { return }
         try? await center.add(notification(for: job))
     }

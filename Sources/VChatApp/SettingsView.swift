@@ -223,6 +223,6 @@ private struct BackgroundReplySettings: View {
         }.navigationTitle("后台回复与提醒").task { await refresh() }
         .onChange(of: phase) { _, value in if value == .active { Task { await refresh() } } }
     }
-    private func refresh() async { permission = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus }
+    private func refresh() async { permission = await ReplyPresentation.authorizationStatus() }
 }
 #endif
