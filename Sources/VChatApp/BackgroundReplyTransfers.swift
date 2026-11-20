@@ -7,9 +7,11 @@ import VChatCore
 /// buffers the response body and cannot be used for incremental SSE presentation.
 @MainActor final class BackgroundReplyTransfers: NSObject, @preconcurrency URLSessionDataDelegate, @preconcurrency URLSessionDownloadDelegate {
     static let identifier = "vchat.background-replies.v1"
+    private let backgroundIdentifier: String
     private let reconnectLegacy: Bool
     private let configuration: URLSessionConfiguration
-    init(configuration: URLSessionConfiguration? = nil) {
+    init(configuration: URLSessionConfiguration? = nil, backgroundIdentifier: String = BackgroundReplyTransfers.identifier) {
+        self.backgroundIdentifier = backgroundIdentifier
         reconnectLegacy = configuration == nil
         self.configuration = configuration ?? .ephemeral
         self.configuration.timeoutIntervalForRequest = 600
@@ -19,8 +21,8 @@ import VChatCore
         self.configuration.urlCache = nil
         super.init()
     }
-    private static func backgroundConfiguration() -> URLSessionConfiguration {
-        let config = URLSessionConfiguration.background(withIdentifier: Self.identifier)
+    private static func backgroundConfiguration(_ identifier: String) -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.background(withIdentifier: identifier)
         config.sessionSendsLaunchEvents = true
         config.isDiscretionary = false
         config.httpShouldSetCookies = false
@@ -32,7 +34,7 @@ import VChatCore
     private lazy var session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
 
     // Reconnect to build 18's existing system jobs without ever resubmitting them.
-    private lazy var legacySession = URLSession(configuration: Self.backgroundConfiguration(), delegate: self, delegateQueue: .main)
+    private lazy var legacySession = URLSession(configuration: Self.backgroundConfiguration(backgroundIdentifier), delegate: self, delegateQueue: .main)
     struct Receipt: Codable, Sendable {
         var error: String?
         var stopped = false
@@ -229,8 +231,9 @@ import VChatCore
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let id = task.taskDescription else { return }
         if id.hasPrefix(ServerReplyClient.taskPrefix) {
-            let job=String(id.dropFirst(ServerReplyClient.taskPrefix.count)); downloads[job]=nil
-            if error != nil { remote[job]?.downloadFailed() }
+            let job=String(id.dropFirst(ServerReplyClient.taskPrefix.count))
+            if downloads[job]?.taskIdentifier == task.taskIdentifier { downloads[job]=nil }
+            if error != nil && downloads[job] == nil { remote[job]?.downloadFailed() }
             return
         }
         let status = (task.response as? HTTPURLResponse)?.statusCode

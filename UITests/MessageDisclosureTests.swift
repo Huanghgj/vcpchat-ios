@@ -116,7 +116,7 @@ final class MessageDisclosureTests: XCTestCase {
         app.launch()
         guard app.staticTexts["首段后台完成"].waitForExistence(timeout:25) else { XCTFail("The original reply did not recover"); return }
         XCTAssertTrue(send.waitForExistence(timeout:15))
-        XCTAssertEqual(app.staticTexts["首段后台完成"].count,1)
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format:"label == %@", "首段后台完成")).count,1)
         let (count,_)=try await URLSession.shared.data(from:url.appendingPathComponent("count").appendingPathComponent(id))
         XCTAssertEqual(String(decoding:count,as:UTF8.self),"1")
     }

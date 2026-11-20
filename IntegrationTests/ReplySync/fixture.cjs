@@ -6,11 +6,18 @@ const {createService}=plugin;
 const prefix='/api/plugins/VChatReplySync';
 async function fixture(directory=fs.mkdtempSync(path.join(os.tmpdir(),'vchat-reply-')), mountPlugin=false) {
   let service;
-  const runs=new Map(), requests=[];
+  const runs=new Map(), requests=[], archiveOnly=new Set();
   const server=http.createServer(async(req,res)=>{
     const chunks=[]; for await(const c of req) chunks.push(c);
     if(chunks.length) req.body=JSON.parse(Buffer.concat(chunks));
-    if(req.url.startsWith(prefix+'/')) { req.url=req.url.slice(prefix.length); return service.handle(req,res); }
+    if(req.url.startsWith(prefix+'/')) {
+      req.url=req.url.slice(prefix.length);
+      const jobPath=req.url.split('?')[0];
+      if(req.method==='PUT' && req.body?.model?.startsWith('archive-')) archiveOnly.add(jobPath);
+      // Simulate a permanently unavailable live reader, not a failed model request.
+      if(req.method==='GET' && archiveOnly.has(jobPath)) {res.writeHead(503);return res.end();}
+      return service.handle(req,res);
+    }
     if(req.url.startsWith('/v1/chat') && req.method==='POST') {
       const model=req.body.model;
       requests.push({model,url:req.url}); runs.set(model,res);

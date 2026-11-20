@@ -99,7 +99,7 @@ jobs:
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
             ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
-          for scenario in testSystemTransferStreamsBeforeCompletionAndCatchesUp testHomeDuringStreamThenReturnBeforeFinish testServerReplySurvivesProcessLossWithoutSecondGeneration; do
+          for scenario in testSystemTransferStreamsBeforeCompletionAndCatchesUp testHomeDuringStreamThenReturnBeforeFinish testServerReplySurvivesProcessLossWithoutSecondGeneration testServerReplyUsesDownloadedArchiveWhenLiveReaderIsUnavailable; do
             grep -E "${scenario}.*passed" "$VCHAT_ARTIFACTS/results/phone-tests.log"
           done
       - name: Save simulator app

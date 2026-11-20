@@ -1640,6 +1640,36 @@ extension PhoneInteractionTests {
         XCTAssertEqual(record?.content,"前缀首段补齐"); XCTAssertEqual(record?.status,"complete")
     }
 
+    @MainActor func testServerReplyUsesDownloadedArchiveWhenLiveReaderIsUnavailable() async throws {
+        guard let endpoint=ProcessInfo.processInfo.environment["VCHAT_REPLY_SYNC_FIXTURE"],let url=URL(string:endpoint) else {
+            throw XCTSkip("Requires VChatReplySync and its loopback model fixture")
+        }
+        let (root,db)=try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let id=UUID().uuidString, name="archive-" + id
+        let model=ChatViewModel(vault:CredentialVault(service:name))
+        model.replyTransfers=BackgroundReplyTransfers(backgroundIdentifier:"vchat.tests." + id)
+        let answer=StoredMessage(topicID:"archive",role:"assistant",content:"前缀",status:"connecting")
+        let room=ChatRoom(id:answer.topicID,messages:[answer])
+        model.store=db; model.rooms[room.id]=room
+        room.receivesInBackground=true; room.serverOwnsReply=true; room.busy=true
+        try await db.save(answer); try await model.restoreBackgroundReplies(store:db,root:root)
+        let job=BackgroundReplyJob(messageID:answer.id,topicID:room.id,userID:nil)
+        let chat=ChatRequest(configuration:.init(server:endpoint,model:name),apiKey:"fixture",messages:[.init(role:"user",content:"test")])
+        let ticket=try await model.replyTransfers.submit(job,request:chat,room:room,store:db)
+        let reader=Task { await model.collectBackgroundReply(job,ticket:ticket,room:room,store:db) }
+        defer { reader.cancel() }
+        try await eventually("server accepted the request") {
+            guard let (data,_)=try? await URLSession.shared.data(from:url.appendingPathComponent("count").appendingPathComponent(name)) else { return false }
+            return String(decoding:data,as:UTF8.self)=="1"
+        }
+        _ = try await URLSession.shared.data(from:url.appendingPathComponent("release").appendingPathComponent(name))
+        let deadline=ContinuousClock.now + .seconds(60)
+        while ["connecting","streaming"].contains(room.messages[0].status) && ContinuousClock.now < deadline { try await Task.sleep(for:.milliseconds(150)) }
+        let saved=try await db.messages(topicID:room.id).first
+        XCTAssertEqual(saved?.status,"complete"); XCTAssertEqual(saved?.content,"前缀首段后台完成"); XCTAssertEqual(saved?.reasoning,"思考")
+    }
+
     @MainActor func testStoppedTransferCannotCompleteRegeneratedMessage() async throws {
         let (root, db) = try await makeMediaDatabase()
         defer { try? FileManager.default.removeItem(at: root) }

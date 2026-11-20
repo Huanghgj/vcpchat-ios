@@ -93,14 +93,23 @@ import VChatCore
 @MainActor enum ReplyPresentation {
     static let modeKey = "native.background-replies"
     static let islandKey = "native.reply-activity"
+    static let activityNoticeKey = "native.last-reply-activity-notice"
 
     static func start(id: String, topicID: String, receivedBytes: Int) {
-        guard UserDefaults.standard.object(forKey: islandKey) as? Bool != false,
-              ActivityAuthorizationInfo().areActivitiesEnabled, UIApplication.shared.applicationState != .background,
+        guard UserDefaults.standard.object(forKey: islandKey) as? Bool != false else { return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            UserDefaults.standard.set("系统未允许 VChat 显示实时活动。", forKey:activityNoticeKey); return
+        }
+        guard UIApplication.shared.applicationState != .background,
               !Activity<ReplyActivityAttributes>.activities.contains(where: { $0.attributes.jobID == id && $0.activityState == .active }) else { return }
         let attributes = ReplyActivityAttributes(jobID: id, topicID: topicID, started: Date())
-        _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting, receivedBytes: receivedBytes),
-            staleDate: Date().addingTimeInterval(600)), pushType: nil)
+        do {
+            _ = try Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting, receivedBytes: receivedBytes),
+                staleDate: Date().addingTimeInterval(600)), pushType: nil)
+            UserDefaults.standard.removeObject(forKey:activityNoticeKey)
+        } catch {
+            UserDefaults.standard.set("实时活动未启动：" + error.localizedDescription, forKey:activityNoticeKey)
+        }
     }
     nonisolated static func update(id: String, receivedBytes: Int) async {
         for activity in Activity<ReplyActivityAttributes>.activities where activity.attributes.jobID == id && activity.activityState == .active {
@@ -162,7 +171,7 @@ import VChatCore
     @objc private func leavingForeground() {
         // Start while still foreground-eligible, only for outstanding user requests.
         for room in model.rooms.values where room.busy && room.receivesInBackground && !room.cancelled {
-            if let id = room.backgroundJobID, !ReplyRuntime.systemPresents(room.replyRuntimeID ?? id) { ReplyPresentation.start(id: id, topicID: room.id, receivedBytes: room.receivedReplyBytes) }
+            if let id = room.backgroundJobID, room.serverOwnsReply || !ReplyRuntime.systemPresents(room.replyRuntimeID ?? id) { ReplyPresentation.start(id: id, topicID: room.id, receivedBytes: room.receivedReplyBytes) }
         }
     }
     @objc private func returningToForeground() {

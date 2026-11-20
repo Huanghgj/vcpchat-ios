@@ -34,7 +34,7 @@ import VChatCore
     private let scheduleDownload: (URLRequest) -> Void
     private var worker: Task<Void,Never>?
     private var access: Access?
-    private var done = false, stopping = false, scheduled = false
+    private var done = false, stopping = false, scheduled = false, accepted = false
     private var epoch = UUID()
     private var replyFile: URL { directory.appendingPathComponent("response") }
     static func account(_ id: String) -> String { "server-reply-v1." + id }
@@ -58,7 +58,8 @@ import VChatCore
     }
     private func cursor() throws -> Int {
         if !FileManager.default.fileExists(atPath:replyFile.path) { return 0 }
-        return (try FileManager.default.attributesOfItem(atPath:replyFile.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard let size = try FileManager.default.attributesOfItem(atPath:replyFile.path)[.size] as? NSNumber else { throw Failure.invalid }
+        return size.intValue
     }
     private func complete(_ error: String? = nil, stopped: Bool = false) {
         guard !done else { return }; done=true; worker?.cancel()
@@ -108,7 +109,7 @@ import VChatCore
         access=grant
     }
     func start(initial: URLRequest? = nil, route: String = "chatvcp", downloadExists: Bool = false) {
-        scheduled=downloadExists
+        scheduled=downloadExists; accepted=downloadExists
         let own=epoch
         worker=Task { [self] in
             var create=initial, tries=0
@@ -131,14 +132,15 @@ import VChatCore
                         struct Ack: Decodable { let id:String, version:Int }
                         let ack=try JSONDecoder().decode(Ack.self,from:data)
                         guard ack.id.lowercased()==id.lowercased(), ack.version==1 else { throw Failure.invalid }
+                        accepted=true; retryDownloadOnReturn()
                     }
                     guard !done, !Task.isCancelled, epoch==own else { return }
-                    if !scheduled { scheduled=true; scheduleDownload(access.request(method:"GET",suffix:"result")) }
                     let req=access.request(method:"GET",offset:try cursor())
                     let (data,response)=try await network.data(for:req); try check(response)
                     guard !done, !Task.isCancelled, epoch==own else { return }
                     guard data.count < 256*1024 else { throw Failure.invalid }
                     try apply(JSONDecoder().decode(Page.self,from:data))
+                    if !accepted { accepted=true; retryDownloadOnReturn() }
                     tries=0
                 } catch {
                     guard !done, !Task.isCancelled, epoch==own else { return }
@@ -159,7 +161,7 @@ import VChatCore
         }
     }
     func retryDownloadOnReturn() {
-        if !done, !stopping, !scheduled, let access { scheduled=true; scheduleDownload(access.request(method:"GET",suffix:"result")) }
+        if accepted, !done, !stopping, !scheduled, let access { scheduled=true; scheduleDownload(access.request(method:"GET",suffix:"result")) }
     }
     func downloadFailed() { scheduled=false }
     func stop() {

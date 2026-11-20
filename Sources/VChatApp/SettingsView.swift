@@ -190,6 +190,7 @@ private struct BackgroundReplySettings: View {
     @AppStorage(ReplyPresentation.modeKey) private var enabled = false
     @AppStorage(ReplyPresentation.islandKey) private var island = true
     @AppStorage(ServerReplyClient.preference) private var serverSync = false
+    @AppStorage(ReplyPresentation.activityNoticeKey) private var activityNotice = ""
     @AppStorage(ReplyRuntime.noticeKey) private var runtimeNotice = ""
     @State private var permission: UNAuthorizationStatus = .notDetermined
     @State private var notice = ""
@@ -207,6 +208,7 @@ private struct BackgroundReplySettings: View {
             }
             Section {
                 Toggle("在锁屏与灵动岛显示进度", isOn: $island)
+                if island && !activityNotice.isEmpty { Text(activityNotice).font(.caption).foregroundStyle(.secondary) }
                 if permission == .notDetermined {
                     Button("允许回复完成通知") {
                         Task {
