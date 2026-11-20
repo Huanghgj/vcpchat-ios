@@ -562,6 +562,15 @@ final class PhoneInteractionTests: XCTestCase {
         XCTAssertEqual(VCPMarkup.parse(other),[.divider("user",false),.text("你好"),.divider("user",true)])
     }
 
+    func testResultBodyKeepsStatusLikeLinesInsidePluginOutput() {
+        let source = "- 工具名称: 天气\n- 执行状态: 成功\n- 返回内容: 详细记录\n- 执行状态: 内部记录失败\n- Result: 原始值"
+        let result = VCPMarkup.resultFields(source)
+        XCTAssertEqual(result.tool, "天气"); XCTAssertEqual(result.status, "成功")
+        XCTAssertEqual(result.content, "详细记录\n- 执行状态: 内部记录失败\n- Result: 原始值")
+        let unlabelled = VCPMarkup.resultFields("- 工具名称: 天气\n- 执行状态: 成功\n无字段名的返回正文")
+        XCTAssertEqual(unlabelled.content, "无字段名的返回正文")
+    }
+
     func testDocumentedBatchInMarkdownIsLiteral() async throws {
         let sample=batch("演示",id:receiptID,shell:false)
         let fence=String(repeating:"`",count:3)

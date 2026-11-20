@@ -14,10 +14,13 @@ public extension EnvironmentValues {
 /// Width and presentation settings are part of the key; an old width is never replayed after rotation.
 @MainActor public final class TranscriptLayoutMemory {
     let finishedReplies = NSCache<NSString,FinishedReply>()
+    private let foldChoices = NSCache<NSString,NSNumber>()
+    func foldChoice(_ key:String) -> Bool? { foldChoices.object(forKey:key as NSString)?.boolValue }
+    func rememberFold(_ expanded:Bool,key:String) { foldChoices.setObject(NSNumber(value:expanded),forKey:key as NSString) }
     private let heights = NSCache<NSString,NSNumber>()
     private let images = NSCache<NSString,NSValue>()
-    public init() { heights.countLimit=512; images.countLimit=1024; finishedReplies.countLimit=24 + 2 * TranscriptPreloadDepth.range.upperBound; finishedReplies.totalCostLimit=3*1024*1024 }
-    public func clear() { finishedReplies.removeAllObjects(); heights.removeAllObjects(); images.removeAllObjects() }
+    public init() { foldChoices.countLimit=512; heights.countLimit=512; images.countLimit=1024; finishedReplies.countLimit=24 + 2 * TranscriptPreloadDepth.range.upperBound; finishedReplies.totalCostLimit=3*1024*1024 }
+    public func clear() { foldChoices.removeAllObjects(); finishedReplies.removeAllObjects(); heights.removeAllObjects(); images.removeAllObjects() }
     private func key(_ id:String,_ source:String,_ width:CGFloat,_ variant:String) -> NSString {
         "\(id):\(source.hashValue):\(Int(width.rounded())):\(variant)" as NSString
     }

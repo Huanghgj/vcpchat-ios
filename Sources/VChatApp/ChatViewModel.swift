@@ -207,6 +207,16 @@ struct TopicDraft: Codable, Sendable {
         loadTask = nil
     }
     private func loadDatabase() async {
+        #if DEBUG && os(iOS) && targetEnvironment(simulator)
+        if let sample = ProcessInfo.processInfo.environment["VCHAT_TEST_DISCLOSURE_MESSAGE"] {
+            let topic = ChatTopic(id:"test-disclosures",ownerId:"assistant")
+            let message = StoredMessage(topicID:topic.id,role:"assistant",content:sample,reasoning:"这段单独的推理")
+            agents = [VCPAgent(id:"assistant",name:"助手")]; topics = [topic]
+            rooms[topic.id] = ChatRoom(id:topic.id,messages:[message]); activeTopicID = topic.id
+            renderOptions.motion = false; requestedReplyTopic = topic.id; loading = false
+            return
+        }
+        #endif
         do {
             let root: URL
             if let isolated = ProcessInfo.processInfo.environment["VCHAT_DATA_DIR"] { root = URL(fileURLWithPath: isolated) }
