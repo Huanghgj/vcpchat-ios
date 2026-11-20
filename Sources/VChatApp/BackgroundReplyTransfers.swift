@@ -3,12 +3,20 @@ import Foundation
 import UIKit
 import VChatCore
 
-/// The daemon owns the POST from the outset; switching apps never replays a chat or a tool call.
+/// Keep the same live data task across scene changes. A background upload task
+/// buffers the response body and cannot be used for incremental SSE presentation.
 @MainActor final class BackgroundReplyTransfers: NSObject, @preconcurrency URLSessionDataDelegate {
     static let identifier = "vchat.background-replies.v1"
+    private let reconnectLegacy: Bool
     private let configuration: URLSessionConfiguration
     init(configuration: URLSessionConfiguration? = nil) {
-        self.configuration = configuration ?? Self.backgroundConfiguration()
+        reconnectLegacy = configuration == nil
+        self.configuration = configuration ?? .ephemeral
+        self.configuration.timeoutIntervalForRequest = 600
+        self.configuration.timeoutIntervalForResource = 600
+        self.configuration.shouldUseExtendedBackgroundIdleMode = true
+        self.configuration.httpShouldSetCookies = false
+        self.configuration.urlCache = nil
         super.init()
     }
     private static func backgroundConfiguration() -> URLSessionConfiguration {
@@ -23,14 +31,20 @@ import VChatCore
     }
     private lazy var session = URLSession(configuration: configuration, delegate: self, delegateQueue: .main)
 
+    // Reconnect to build 18's existing system jobs without ever resubmitting them.
+    private lazy var legacySession = URLSession(configuration: Self.backgroundConfiguration(), delegate: self, delegateQueue: .main)
     struct Receipt: Codable, Sendable {
         var error: String?
         var stopped = false
     }
+    enum Event: Sendable { case bytesAvailable, finished(Receipt) }
     struct Ticket {
         let directory: URL
-        let events: AsyncStream<Receipt>
-        fileprivate let output: AsyncStream<Receipt>.Continuation
+        let events: AsyncStream<Event>
+        fileprivate let output: AsyncStream<Event>.Continuation
+    }
+    func refreshProgress() {
+        for (id,ticket) in tickets where !delivered.contains(id) { ticket.output.yield(.bytesAvailable) }
     }
     private var tickets: [String: Ticket] = [:]
     private var tasks: [String: URLSessionTask] = [:]
@@ -43,6 +57,7 @@ import VChatCore
 
     func handleWake(_ completion: @escaping () -> Void) {
         self.completion = completion
+        if root != nil && reconnectLegacy { _ = legacySession }
         finishWakeIfReady()
     }
     func abandonWake() {
@@ -76,7 +91,7 @@ import VChatCore
         self.root = root
         for id in ids { _ = makeTicket(id, root: root) }
         let restored = tickets
-        let running = await session.allTasks
+        let running = (!reconnectLegacy || (jobs.isEmpty && completion == nil)) ? [] : await legacySession.allTasks
         for task in running {
             guard let id = task.taskDescription, ids.contains(id) else { task.cancel(); continue }
             guard task.state != .suspended else { task.cancel(); continue }
@@ -91,21 +106,19 @@ import VChatCore
                 else { deliver(Receipt(error: "后台请求已中断，可在原消息上重新生成"), for: id) }
             }
         }
+        refreshProgress()
         return restored
     }
     private func makeTicket(_ id: String, root: URL) -> Ticket {
-        let (events, output) = AsyncStream<Receipt>.makeStream()
+        let (events, output) = AsyncStream<Event>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let ticket = Ticket(directory: root.appendingPathComponent(id, isDirectory: true), events: events, output: output)
         tickets[id] = ticket
         return ticket
     }
     nonisolated private static func prepare(_ request: ChatRequest, directory: URL) async throws -> URLRequest {
-        var call = try request.urlRequest(streaming: false)
+        let call = try request.urlRequest(streaming: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        guard let body = call.httpBody else { throw ClientError.invalidConfiguration }
-        try body.write(to: directory.appendingPathComponent("post"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        call.httpBody = nil
         return call
     }
     func submit(_ job: BackgroundReplyJob, request: ChatRequest, room: ChatRoom, store: ChatStore) async throws -> Ticket {
@@ -113,17 +126,24 @@ import VChatCore
         try await store.registerBackgroundReply(job)
         let ticket = makeTicket(job.id, root: root)
         room.backgroundJobID = job.id
-        if !room.cancelled { ReplyPresentation.start(job) }
         do {
             let call = try await Self.prepare(request, directory: ticket.directory)
-            if room.cancelled { deliver(Receipt(stopped: true), for: job.id); return ticket }
-            let task = session.uploadTask(with: call, fromFile: ticket.directory.appendingPathComponent("post"))
+            if room.cancelled {
+                if room.cancellation == .interrupted { interrupt(job.id) } else { cancel(job.id) }
+                return ticket
+            }
+            let task = session.dataTask(with: call)
+            task.prefersIncrementalDelivery = true
             task.taskDescription = job.id; tasks[job.id] = task
             task.resume()
         } catch {
             deliver(Receipt(error: error.localizedDescription), for: job.id)
         }
         return ticket
+    }
+    func interrupt(_ id: String) {
+        tasks[id]?.cancel()
+        deliver(Receipt(error: "系统已结束后台运行，已收到的内容已保留。"), for: id)
     }
     func cancel(_ id: String) {
         tasks[id]?.cancel()
@@ -133,6 +153,7 @@ import VChatCore
     // Response bytes can arrive in several callbacks, even across a process relaunch.
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         guard let id = dataTask.taskDescription, let ticket = tickets[id], !delivered.contains(id) else { return }
+        if let http = dataTask.response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { return }
         do {
             let url = ticket.directory.appendingPathComponent("response")
             if !FileManager.default.fileExists(atPath: url.path) {
@@ -140,8 +161,9 @@ import VChatCore
             }
             let file = try FileHandle(forWritingTo: url); defer { try? file.close() }
             let length = try file.seekToEnd()
-            guard length + UInt64(data.count) <= 16_000_000 else { throw ClientError.tooLarge }
+            guard length + UInt64(data.count) <= 64 * 1024 * 1024 else { throw ClientError.tooLarge }
             try file.write(contentsOf: data)
+            ticket.output.yield(.bytesAvailable)
         } catch {
             dataTask.cancel()
             deliver(Receipt(error: error.localizedDescription), for: id)
@@ -162,15 +184,62 @@ import VChatCore
         // Keep a receipt until the SQLite transaction commits. Relaunch can replay that commit, never the POST.
         try? JSONEncoder().encode(receipt).write(to: ticket.directory.appendingPathComponent("receipt"),
             options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        ticket.output.yield(receipt); ticket.output.finish()
-    }
-    nonisolated static func readReply(_ directory: URL) async throws -> FinishedReply {
-        try FinishedReply(data: Data(contentsOf: directory.appendingPathComponent("response"), options: .mappedIfSafe))
+        ticket.output.yield(.finished(receipt)); ticket.output.finish()
     }
     func acknowledge(_ id: String, committed: Bool) {
         if let ticket = tickets.removeValue(forKey: id), committed { try? FileManager.default.removeItem(at: ticket.directory) }
         tasks[id] = nil; delivered.remove(id)
         finishWakeIfReady()
+    }
+}
+
+// The response spool is also the relaunch checkpoint. A new reader replays it
+// once; the running reader consumes only new bytes, including across scene changes.
+private actor ReplyStreamReader {
+    private let file: URL
+    private var offset: UInt64 = 0
+    private var parser = SSEByteDecoder()
+    private var json: Bool?
+    private var text = "", reasoning = ""
+    private var byteCount = 0
+    private var done = false
+    private var invalid = false
+    init(_ directory: URL) { file = directory.appendingPathComponent("response") }
+    var snapshot: FinishedReply? { byteCount > 0 || done ? .init(text: text, reasoning: reasoning) : nil }
+    private func append(_ delta: TokenDelta) throws {
+        let size = delta.text.utf8.count + delta.reasoning.utf8.count
+        guard size <= 8_000_000 - byteCount else { throw ClientError.tooLarge }
+        byteCount += size
+        text += delta.text; reasoning += delta.reasoning; done = delta.done
+    }
+    func read(final: Bool) throws -> FinishedReply? {
+        guard !invalid else { throw ClientError.invalidResponse }
+        do { return try consume(final: final) }
+        catch { invalid = true; throw error }
+    }
+    private func consume(final: Bool) throws -> FinishedReply? {
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            if final { throw ClientError.invalidResponse }; return nil
+        }
+        let input = try FileHandle(forReadingFrom: file); defer { try? input.close() }
+        try input.seek(toOffset: offset)
+        while !done, json != true, let data = try input.read(upToCount: 64 * 1024), !data.isEmpty {
+            offset += UInt64(data.count)
+            if json == nil {
+                guard let first = data.first(where: { ![9,10,13,32].contains($0) }) else { continue }
+                json = first == 123 // a legacy request or an endpoint that ignores stream:true
+                if json == true { break }
+            }
+            for byte in data {
+                if let delta = try parser.byte(byte) { try append(delta); if done { break } }
+            }
+        }
+        if final {
+            if json == true { return try FinishedReply(data: Data(contentsOf: file, options: .mappedIfSafe)) }
+            if !done, let last = try parser.finish() { try append(last) }
+            guard done else { throw ClientError.interrupted }
+        }
+        return snapshot
     }
 }
 
@@ -190,7 +259,7 @@ extension ChatViewModel {
                 rooms[room.id] = room
             }
             room.busy = true; room.receivesInBackground = true; room.backgroundJobID = job.id
-            room.connection = "正在等待后台回复"
+            room.connection = "正在接收回复"
             room.generation = Task {
                 await collectBackgroundReply(job, ticket: ticket, room: room, store: store)
                 room.busy = false; room.generation = nil
@@ -200,45 +269,73 @@ extension ChatViewModel {
     func collectBackgroundReply(_ job: BackgroundReplyJob, ticket: BackgroundReplyTransfers.Ticket, room: ChatRoom, store: ChatStore) async {
         var committed = false
         defer {
-            room.backgroundJobID = nil
+            room.finishedSpeakerBytes += room.receivedReplyBytes
+            room.backgroundJobID = nil; room.receivedReplyBytes = 0
             replyTransfers.acknowledge(job.id, committed: committed)
         }
-        for await receipt in ticket.events {
-            var issue = receipt.error
-            var reply: FinishedReply?
-            if !receipt.stopped && issue == nil {
-                do { reply = try await BackgroundReplyTransfers.readReply(ticket.directory) }
-                catch { issue = "未收到完整的 AI 回复" }
+        let reader = ReplyStreamReader(ticket.directory)
+        let message = room.messages.first { $0.id == job.messageID }
+        let prefix = message?.text ?? "", reasoningPrefix = message?.reasoning ?? ""
+        var nextIslandUpdate: ContinuousClock.Instant?, nextBackgroundUpdate: ContinuousClock.Instant?
+        for await event in ticket.events {
+            switch event {
+            case .bytesAvailable:
+                guard !room.cancelled else { continue }
+                if let live = try? await reader.read(final: false), !room.cancelled {
+                    message?.text = prefix + live.text; message?.reasoning = reasoningPrefix + live.reasoning
+                    message?.status = "streaming"; room.connection = "正在回复"; room.frames += 1
+                    let bytes = live.text.utf8.count + live.reasoning.utf8.count
+                    room.receivedReplyBytes = bytes
+                    let now = ContinuousClock.now
+                    if nextIslandUpdate.map({ now >= $0 }) ?? true {
+                        nextIslandUpdate = now + .seconds(1)
+                        if let turn = room.replyRuntimeID { ReplyRuntime.progress(turn,bytes:room.finishedSpeakerBytes + bytes) }
+                    }
+                    if backgrounded, nextBackgroundUpdate.map({ now >= $0 }) ?? true {
+                        nextBackgroundUpdate = now + .seconds(2)
+                        await updateReplyActivity(job.id, bytes)
+                    } else if !backgrounded { nextBackgroundUpdate = nil }
+                    // Only the newest signal matters; the spool retains every chunk.
+                    try? await Task.sleep(for: .milliseconds(backgrounded ? 100 : 16))
+                }
+            case .finished(let receipt):
+                var issue = receipt.error
+                var reply: FinishedReply?
+                do { reply = try await reader.read(final: !receipt.stopped && issue == nil) }
+                catch {
+                    reply = await reader.snapshot
+                    if issue == nil { issue = error is ClientError ? "回复传输未完整结束" : "未收到完整的 AI 回复" }
+                }
+                let stopped = receipt.stopped || room.cancellation == .stopped
+                do {
+                    let record: StoredMessage?
+                    do { record = try await store.finishBackgroundReply(job, reply: reply, stopped: stopped, interrupted: issue != nil) }
+                    catch ClientError.tooLarge {
+                        issue = ClientError.tooLarge.localizedDescription
+                        record = try await store.finishBackgroundReply(job, reply: nil)
+                    }
+                    committed = true
+                    guard let record else { return }
+                    if let message = room.messages.first(where: { $0.id == record.id }) {
+                        message.text = record.content; message.reasoning = record.reasoning; message.status = record.status
+                    }
+                    if record.status == "complete" {
+                        if let id = job.userID { room.messages.first { $0.id == id }?.status = "complete" }
+                        room.connection = "回复完成"
+                        await ReplyPresentation.end(job.id, phase: .complete)
+                        await ReplyPresentation.notify(job)
+                    } else {
+                        room.connection = stopped ? "已停止" : "已中断"
+                        room.error = stopped ? nil : issue
+                        await ReplyPresentation.end(job.id, phase: stopped ? .stopped : .interrupted)
+                    }
+                    room.pendingCount = room.messages.filter { $0.status == "pending" }.count
+                } catch {
+                    room.error = "本机保存失败：" + error.localizedDescription
+                    await ReplyPresentation.end(job.id, phase: .interrupted)
+                }
+                return
             }
-            let stopped = receipt.stopped || room.cancellation == .stopped
-            do {
-                let record: StoredMessage?
-                do { record = try await store.finishBackgroundReply(job, reply: stopped ? nil : reply, stopped: stopped) }
-                catch ClientError.tooLarge {
-                    issue = ClientError.tooLarge.localizedDescription
-                    record = try await store.finishBackgroundReply(job, reply: nil)
-                }
-                committed = true
-                guard let record else { return }
-                if let message = room.messages.first(where: { $0.id == record.id }) {
-                    message.text = record.content; message.reasoning = record.reasoning; message.status = record.status
-                }
-                if record.status == "complete" {
-                    if let id = job.userID { room.messages.first { $0.id == id }?.status = "complete" }
-                    room.connection = "回复完成"
-                    await ReplyPresentation.end(job.id, phase: .complete)
-                    await ReplyPresentation.notify(job)
-                } else {
-                    room.connection = stopped ? "已停止" : "已中断"
-                    room.error = stopped ? nil : issue
-                    await ReplyPresentation.end(job.id, phase: stopped ? .stopped : .interrupted)
-                }
-                room.pendingCount = room.messages.filter { $0.status == "pending" }.count
-            } catch {
-                room.error = "本机保存失败：" + error.localizedDescription
-                await ReplyPresentation.end(job.id, phase: .interrupted)
-            }
-            return
         }
     }
 }

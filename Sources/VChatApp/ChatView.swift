@@ -54,6 +54,8 @@ struct ChatView: View {
             }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(WorkspacePalette(theme: model.appearance.theme).solid, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             #endif
             .toolbar {
                 #if os(iOS)
@@ -178,6 +180,7 @@ private struct ChatTimeline: View {
                                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                         }
                         .listStyle(.plain)
+                        .clipped()
                         .scrollDismissesKeyboard(.interactively)
                         .scrollContentBackground(.hidden)
                         .buttonStyle(.plain)

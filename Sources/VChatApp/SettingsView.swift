@@ -189,6 +189,7 @@ private struct RenderingSettings: View {
 private struct BackgroundReplySettings: View {
     @AppStorage(ReplyPresentation.modeKey) private var enabled = false
     @AppStorage(ReplyPresentation.islandKey) private var island = true
+    @AppStorage(ReplyRuntime.noticeKey) private var runtimeNotice = ""
     @State private var permission: UNAuthorizationStatus = .notDetermined
     @State private var notice = ""
     @Environment(\.scenePhase) private var phase
@@ -198,8 +199,9 @@ private struct BackgroundReplySettings: View {
         Form {
             Section {
                 Toggle("后台收回复", isOn: $enabled)
+                if enabled && !runtimeNotice.isEmpty { Text(runtimeNotice).font(.caption).foregroundStyle(.secondary) }
             } footer: {
-                Text("开启后，新发出的请求可以在锁屏或切换 App 后继续接收。整条回复到齐后显示；关闭可恢复逐字显示。")
+                Text("前台随服务返回显示回复；锁屏或切换 App 后继续接收。回到聊天会补上已经收到的内容。iOS 26 及以上会申请持续后台运行；较早系统挂起 App 时，进度可能暂停。")
             }
             Section {
                 Toggle("在锁屏与灵动岛显示进度", isOn: $island)

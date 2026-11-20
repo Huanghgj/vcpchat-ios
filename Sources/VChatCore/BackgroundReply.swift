@@ -25,13 +25,14 @@ public struct BackgroundReplyJob: Codable, Sendable, FetchableRecord, Persistabl
     public static let databaseTableName = "backgroundReplies"
     public let id: String, messageID: String, topicID: String
     public let userID: String?
-    public init(messageID: String, topicID: String, userID: String?) {
-        self.id = UUID().uuidString; self.messageID = messageID; self.topicID = topicID; self.userID = userID
+    public init(id: String = UUID().uuidString, messageID: String, topicID: String, userID: String?) {
+        self.id = id; self.messageID = messageID; self.topicID = topicID; self.userID = userID
     }
 }
 
 public struct FinishedReply: Sendable {
     public let text: String, reasoning: String
+    public init(text: String, reasoning: String) { self.text = text; self.reasoning = reasoning }
     public init(data: Data) throws {
         struct Response: Decodable {
             struct Choice: Decodable {
@@ -54,13 +55,16 @@ extension ChatStore {
         try await pool.read { try BackgroundReplyJob.fetchAll($0) }
     }
     /// A late callback must neither resurrect a deleted message nor complete its regeneration.
-    public func finishBackgroundReply(_ job: BackgroundReplyJob, reply: FinishedReply?, stopped: Bool = false) async throws -> StoredMessage? {
+    public func finishBackgroundReply(_ job: BackgroundReplyJob, reply: FinishedReply?, stopped: Bool = false, interrupted: Bool = false) async throws -> StoredMessage? {
         try await pool.write { db in
             guard try BackgroundReplyJob.deleteOne(db, key: job.id),
                   var message = try StoredMessage.fetchOne(db, key: job.messageID), message.topicID == job.topicID else { return nil }
             if let reply {
                 guard message.content.utf8.count + message.reasoning.utf8.count + reply.text.utf8.count + reply.reasoning.utf8.count <= 8_000_000 else { throw ClientError.tooLarge }
-                message.content += reply.text; message.reasoning += reply.reasoning; message.status = "complete"
+                message.content += reply.text; message.reasoning += reply.reasoning
+            }
+            if reply != nil && !interrupted && !stopped {
+                message.status = "complete"
                 if let id = job.userID {
                     try db.execute(sql: "DELETE FROM outbox WHERE id=?", arguments: [id])
                     try db.execute(sql: "UPDATE messages SET status='complete' WHERE id=? AND topicID=? AND role='user'", arguments: [id, job.topicID])
