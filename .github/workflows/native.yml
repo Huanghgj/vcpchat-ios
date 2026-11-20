@@ -29,6 +29,7 @@ jobs:
           set -euo pipefail
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for group in d["devices"].values() for x in group if "iPhone" in x["name"]))')
           echo "VCHAT_SIMULATOR=$device" >> "$GITHUB_ENV"
+          xcrun simctl boot "$device" || true
       - name: Build the simulator app and its tests together
         run: |
           set -euo pipefail
@@ -43,7 +44,6 @@ jobs:
         run: |
           set -euo pipefail
           device="$VCHAT_SIMULATOR"
-          xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           app="$VCHAT_ARTIFACTS/tmp/DerivedData/Build/Products/Debug-iphonesimulator/VChat.app"
           xcrun simctl install "$device" "$app"
@@ -71,7 +71,9 @@ jobs:
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
             ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
-          grep -E "testSystemTransferStreamsBeforeCompletionAndCatchesUp.*passed" "$VCHAT_ARTIFACTS/results/phone-tests.log"
+          for scenario in testSystemTransferStreamsBeforeCompletionAndCatchesUp testHomeDuringStreamThenReturnBeforeFinish; do
+            grep -E "${scenario}.*passed" "$VCHAT_ARTIFACTS/results/phone-tests.log"
+          done
       - name: Save simulator app
         if: ${{ !cancelled() && steps.launch.outcome == 'success' }}
         uses: actions/upload-artifact@v7.0.2

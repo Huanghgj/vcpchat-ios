@@ -62,6 +62,31 @@ final class MessageDisclosureTests: XCTestCase {
         tap(4); tap(5); check([5]); XCTAssertTrue(app.staticTexts["两次调用成功"].exists)
         XCTAssertTrue(app.staticTexts["小雨"].exists); XCTAssertTrue(app.staticTexts["九点"].exists)
     }
+    @MainActor func testHomeDuringStreamThenReturnBeforeFinish() async throws {
+        continueAfterFailure = false
+        guard let endpoint = ProcessInfo.processInfo.environment["VCHAT_STREAM_FIXTURE"],
+              let url = URL(string:endpoint)?.appendingPathComponent("ui") else { throw XCTSkip("Requires the gated loopback server") }
+        let app = XCUIApplication()
+        app.launchEnvironment["VCHAT_TEST_LIVE_ENDPOINT"] = url.absoluteString
+        app.launchArguments = ["-native.background-replies", "YES"]
+        app.launch()
+        let send = app.buttons["发送消息"]
+        XCTAssertTrue(send.waitForExistence(timeout:20)); send.tap()
+        XCTAssertTrue(app.staticTexts["首段"].waitForExistence(timeout:20))
+        XCUIDevice.shared.press(.home)
+        XCTAssertNotEqual(app.state,.runningForeground)
+        _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
+        // Stay away longer than the old 25-second lease. The server cannot
+        // complete until after the partial reply is visible again.
+        try await Task.sleep(for:.seconds(32))
+        app.activate()
+        XCTAssertTrue(app.staticTexts["首段补齐"].waitForExistence(timeout:20))
+        XCTAssertTrue(app.buttons["停止生成"].exists)
+        let (body,_) = try await URLSession.shared.data(from:url.appendingPathComponent("finish"))
+        XCTAssertEqual(String(decoding:body,as:UTF8.self),"1")
+        XCTAssertTrue(send.waitForExistence(timeout:20))
+    }
+
     @MainActor func testScrolledMessageDoesNotPaintBehindChatHeader() throws {
         let app = XCUIApplication()
         app.launchEnvironment["VCHAT_TEST_DISCLOSURE_MESSAGE"] = #"<div id="vcp-root" style="height:2100px;background:#ff00ff">色带</div>"#

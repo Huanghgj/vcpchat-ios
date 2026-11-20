@@ -212,6 +212,23 @@ struct TopicDraft: Codable, Sendable {
     }
     private func loadDatabase() async {
         #if DEBUG && os(iOS) && targetEnvironment(simulator)
+        if let endpoint = ProcessInfo.processInfo.environment["VCHAT_TEST_LIVE_ENDPOINT"],
+           let url = URL(string:endpoint), url.scheme == "http", url.host == "localhost" {
+            do {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                let database = try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
+                let agent = VCPAgent(id:"fixture",name:"测试"), topic = ChatTopic(ownerId:"fixture",title:"流式接收测试")
+                try await database.put(topic,kind:"topic",id:topic.id)
+                store = database; agents = [agent]; topics = [topic]
+                apiKey = "fixture"; configuration = .init(server:endpoint,model:"fixture")
+                let room = ChatRoom(id:topic.id,messages:[])
+                room.draft = "本机测试"; rooms[room.id] = room; activeTopicID = room.id
+                try await restoreBackgroundReplies(store:database,root:root)
+                renderOptions.motion = false; requestedReplyTopic = topic.id
+            } catch { self.error = error.localizedDescription }
+            loading = false; return
+        }
         if let sample = ProcessInfo.processInfo.environment["VCHAT_TEST_DISCLOSURE_MESSAGE"] {
             let topic = ChatTopic(id:"test-disclosures",ownerId:"assistant")
             let message = StoredMessage(topicID:topic.id,role:"assistant",content:sample,reasoning:"这段单独的推理")
