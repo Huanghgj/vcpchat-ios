@@ -33,10 +33,7 @@ import VChatCore
         let events: AsyncStream<Event>
         fileprivate let output: AsyncStream<Event>.Continuation
     }
-    private var displaying = true
-    func setDisplaying(_ value: Bool) {
-        displaying = value
-        guard value else { return }
+    func refreshProgress() {
         for (id,ticket) in tickets where !delivered.contains(id) { ticket.output.yield(.bytesAvailable) }
     }
     private var tickets: [String: Ticket] = [:]
@@ -98,7 +95,7 @@ import VChatCore
                 else { deliver(Receipt(error: "后台请求已中断，可在原消息上重新生成"), for: id) }
             }
         }
-        if displaying { setDisplaying(true) }
+        refreshProgress()
         return restored
     }
     private func makeTicket(_ id: String, root: URL) -> Ticket {
@@ -151,7 +148,7 @@ import VChatCore
             let length = try file.seekToEnd()
             guard length + UInt64(data.count) <= 64 * 1024 * 1024 else { throw ClientError.tooLarge }
             try file.write(contentsOf: data)
-            if displaying { ticket.output.yield(.bytesAvailable) }
+            ticket.output.yield(.bytesAvailable)
         } catch {
             dataTask.cancel()
             deliver(Receipt(error: error.localizedDescription), for: id)
@@ -257,21 +254,31 @@ extension ChatViewModel {
     func collectBackgroundReply(_ job: BackgroundReplyJob, ticket: BackgroundReplyTransfers.Ticket, room: ChatRoom, store: ChatStore) async {
         var committed = false
         defer {
-            room.backgroundJobID = nil
+            room.backgroundJobID = nil; room.receivedReplyBytes = 0
             replyTransfers.acknowledge(job.id, committed: committed)
         }
         let reader = ReplyStreamReader(ticket.directory)
         let message = room.messages.first { $0.id == job.messageID }
         let prefix = message?.text ?? "", reasoningPrefix = message?.reasoning ?? ""
+        var nextIslandUpdate: ContinuousClock.Instant?
         for await event in ticket.events {
             switch event {
             case .bytesAvailable:
-                guard !backgrounded, !room.cancelled else { continue }
-                if let live = try? await reader.read(final: false), !backgrounded, !room.cancelled {
+                guard !room.cancelled else { continue }
+                if let live = try? await reader.read(final: false), !room.cancelled {
                     message?.text = prefix + live.text; message?.reasoning = reasoningPrefix + live.reasoning
                     message?.status = "streaming"; room.connection = "正在回复"; room.frames += 1
-                    // Coalesce delegate bursts; newest wake-up reads the whole unsent suffix.
-                    try? await Task.sleep(for: .milliseconds(16))
+                    let bytes = live.text.utf8.count + live.reasoning.utf8.count
+                    room.receivedReplyBytes = bytes
+                    if backgrounded {
+                        let now = ContinuousClock.now
+                        if nextIslandUpdate.map({ now >= $0 }) ?? true {
+                            nextIslandUpdate = now + .seconds(2)
+                            await updateReplyActivity(job.id, bytes)
+                        }
+                    } else { nextIslandUpdate = nil }
+                    // Only the newest signal matters; the spool retains every chunk.
+                    try? await Task.sleep(for: .milliseconds(backgrounded ? 100 : 16))
                 }
             case .finished(let receipt):
                 var issue = receipt.error

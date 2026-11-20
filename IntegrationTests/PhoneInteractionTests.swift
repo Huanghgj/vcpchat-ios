@@ -1623,13 +1623,15 @@ extension PhoneInteractionTests {
         defer { model.replyTransfers.cancel(job.id) }
         try await eventually("first small frame actually shown before the server may finish") { room.messages[0].text == "前缀首段" }
         guard room.messages[0].status == "streaming" else { XCTFail("No incremental foreground delivery"); return }
+        var islandBytes: [Int] = []
+        model.updateReplyActivity = { id, bytes in if id == job.id { islandBytes.append(bytes) } }
         await model.enterBackground()
         _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
-        try await eventually("background bytes arrived but were not yet presented") {
-            let data = try? Data(contentsOf:ticket.directory.appendingPathComponent("response"))
-            return data.flatMap { String(data:$0,encoding:.utf8) }?.contains("补齐") == true
+        try await eventually("the same SSE stream advances the reply and island before returning") {
+            room.messages[0].text == "前缀首段补齐" && islandBytes.last == "首段补齐思考".utf8.count
         }
-        XCTAssertEqual(room.messages[0].text,"前缀首段")
+        XCTAssertTrue(model.backgrounded)
+        XCTAssertEqual(room.messages[0].status,"streaming")
         await model.enterForeground()
         try await eventually("catch up without a third frame") { room.messages[0].text == "前缀首段补齐" }
         XCTAssertEqual(room.messages[0].reasoning,"思考")

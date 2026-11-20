@@ -8,13 +8,19 @@ import VChatCore
     static let modeKey = "native.background-replies"
     static let islandKey = "native.reply-activity"
 
-    static func start(id: String, topicID: String) {
+    static func start(id: String, topicID: String, receivedBytes: Int) {
         guard UserDefaults.standard.object(forKey: islandKey) as? Bool != false,
               ActivityAuthorizationInfo().areActivitiesEnabled, UIApplication.shared.applicationState != .background,
               !Activity<ReplyActivityAttributes>.activities.contains(where: { $0.attributes.jobID == id && $0.activityState == .active }) else { return }
         let attributes = ReplyActivityAttributes(jobID: id, topicID: topicID, started: Date())
-        _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting),
+        _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting, receivedBytes: receivedBytes),
             staleDate: Date().addingTimeInterval(600)), pushType: nil)
+    }
+    nonisolated static func update(id: String, receivedBytes: Int) async {
+        for activity in Activity<ReplyActivityAttributes>.activities where activity.attributes.jobID == id && activity.activityState == .active {
+            await activity.update(ActivityContent(state: .init(phase: .waiting, receivedBytes: receivedBytes),
+                                                  staleDate: activity.attributes.started.addingTimeInterval(600)))
+        }
     }
     nonisolated static func hideWaitingOnReturn(ids: Set<String>) async {
         for activity in Activity<ReplyActivityAttributes>.activities where ids.contains(activity.id) {
@@ -70,7 +76,7 @@ import VChatCore
     @objc private func leavingForeground() {
         // Start while still foreground-eligible, only for outstanding user requests.
         for room in model.rooms.values where room.busy && room.receivesInBackground && !room.cancelled {
-            if let id = room.backgroundJobID { ReplyPresentation.start(id: id, topicID: room.id) }
+            if let id = room.backgroundJobID { ReplyPresentation.start(id: id, topicID: room.id, receivedBytes: room.receivedReplyBytes) }
         }
     }
     @objc private func returningToForeground() {

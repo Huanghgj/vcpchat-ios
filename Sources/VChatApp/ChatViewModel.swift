@@ -41,6 +41,7 @@ import VChatRendering
     var locationPreference: LocationMessagePreference = .automatic
     var busy = false
     var receivesInBackground = false
+    @ObservationIgnored var receivedReplyBytes = 0
     var backgroundJobID: String?
     var cancellation: SessionState?
     var cancelled: Bool { cancellation != nil }
@@ -154,6 +155,9 @@ struct TopicDraft: Codable, Sendable {
     var credentialsInMemory: Bool { vault.persistence == .session }
     #if os(iOS)
     @ObservationIgnored var replyTransfers = BackgroundReplyTransfers()
+    @ObservationIgnored var updateReplyActivity: @MainActor (String, Int) async -> Void = { id, bytes in
+        await ReplyPresentation.update(id: id, receivedBytes: bytes)
+    }
     var requestedReplyTopic: String?
     private var prefersBackgroundReplies: Bool { UserDefaults.standard.bool(forKey: ReplyPresentation.modeKey) }
     #else
@@ -660,9 +664,6 @@ struct TopicDraft: Codable, Sendable {
     }
     func enterBackground() async {
         backgrounded = true
-        #if os(iOS)
-        replyTransfers.setDisplaying(false)
-        #endif
         await flushDraft(); guard !Task.isCancelled else { return }
         for room in Array(rooms.values) { await room.session.setBackgroundPacing(true) }
         await activity.pause(); await fileNode.pause()
@@ -683,7 +684,7 @@ struct TopicDraft: Codable, Sendable {
         let wasBackgrounded = backgrounded
         backgrounded = false
         #if os(iOS)
-        replyTransfers.setDisplaying(true)
+        replyTransfers.refreshProgress()
         #endif
         for room in Array(rooms.values) { await room.session.setBackgroundPacing(false) }
         if wasBackgrounded {
