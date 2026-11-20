@@ -1,7 +1,7 @@
 name: Native iOS Build
 on:
   pull_request:
-    paths: ['Sources/**', 'IntegrationTests/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
+    paths: ['Sources/**', 'ReplyActivity/**', 'IntegrationTests/**', 'Vendor/**', 'Configuration/**', 'VChat.xcodeproj/**', 'Package.*', '.github/workflows/native.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -116,6 +116,7 @@ jobs:
           app="$VCHAT_ARTIFACTS/tmp/DeviceDerivedData/Build/Products/Release-iphoneos/VChat.app"
           test -x "$app/VChat"
           xcrun lipo "$app/VChat" -verify_arch arm64
+          xcrun lipo "$app/PlugIns/ReplyActivity.appex/ReplyActivity" -verify_arch arm64
           atlas_page=$(find "$app" -type f -path '*/FieldAtlas/index.html' -print)
           test -s "$atlas_page" || { echo "::error::Missing packaged FieldAtlas/index.html"; exit 1; }
           for asset in metric-slice.js atlas-app.js mobile.js atlas.css mobile.css; do
