@@ -255,7 +255,12 @@ struct TopicDraft: Codable, Sendable {
             credentialsLocked = true
             await loadCredentials(allowInteraction: false)
             prefetchLocation()
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = error.localizedDescription
+            #if os(iOS)
+            replyTransfers.abandonWake()
+            #endif
+        }
         loading = false
     }
     func saveServices(bindStickerAccount: Bool = false) async -> Bool {
@@ -550,11 +555,8 @@ struct TopicDraft: Codable, Sendable {
         #if os(iOS)
         if room.receivesInBackground {
             let job = BackgroundReplyJob(messageID: assistant.id, topicID: room.id, userID: acceptedUser)
-            try await store.registerBackgroundReply(job)
-            room.backgroundJobID = job.id
             room.connection = "正在等待后台回复"
-            ReplyPresentation.start(job)
-            let ticket = await replyTransfers.submit(job, request: request, room: room)
+            let ticket = try await replyTransfers.submit(job, request: request, room: room, store: store)
             await collectBackgroundReply(job, ticket: ticket, room: room, store: store)
             return
         }

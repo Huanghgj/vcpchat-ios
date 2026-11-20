@@ -15,6 +15,11 @@ import VChatCore
         _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting),
             staleDate: Date().addingTimeInterval(600)), pushType: nil)
     }
+    static func dismissOrphanedActivities(activeIDs: Set<String>) async {
+        for activity in Activity<ReplyActivityAttributes>.activities where !activeIDs.contains(activity.attributes.jobID) {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
     static func end(_ id: String, phase: ReplyActivityAttributes.ContentState.Phase) async {
         for activity in Activity<ReplyActivityAttributes>.activities where activity.attributes.jobID == id {
             await activity.end(ActivityContent(state: .init(phase: phase), staleDate: nil),
@@ -27,10 +32,13 @@ import VChatCore
         let settings = await center.notificationSettings()
         guard [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus),
               UIApplication.shared.applicationState != .active else { return }
+        try? await center.add(notification(for: job))
+    }
+    static func notification(for job: BackgroundReplyJob) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = "AI 回复已收到"; content.body = "轻点查看这条回复。"
         content.sound = .default; content.threadIdentifier = job.topicID; content.userInfo = ["topicID": job.topicID]
-        try? await center.add(UNNotificationRequest(identifier: job.id, content: content, trigger: nil))
+        return UNNotificationRequest(identifier: job.id, content: content, trigger: nil)
     }
 }
 

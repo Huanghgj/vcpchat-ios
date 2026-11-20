@@ -1547,8 +1547,7 @@ extension PhoneInteractionTests {
         let request = ChatRequest(configuration: .init(server: "https://fixture.invalid", model: "test", endpointMode: .vcpTools),
             apiKey: "fixture", messages: [.init(role: "user", content: "test")], contextTokenLimit: 100, maxOutputTokens: 12)
         let job = BackgroundReplyJob(messageID: answer.id, topicID: topic.id, userID: user.id)
-        try await db.registerBackgroundReply(job)
-        let ticket = await model.replyTransfers.submit(job, request: request, room: room)
+        let ticket = try await model.replyTransfers.submit(job, request: request, room: room, store: db)
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ticket.directory.appendingPathComponent("post"))) as? [String: Any])
         XCTAssertEqual(payload["stream"] as? Bool, false); XCTAssertEqual(payload["contextTokenLimit"] as? Int, 100)
         XCTAssertEqual(payload["max_tokens"] as? Int, 12)
@@ -1561,6 +1560,24 @@ extension PhoneInteractionTests {
         let pending = try await db.pending()
         XCTAssertNil(duplicate); XCTAssertEqual(pending, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ticket.directory.path))
+    }
+
+    @MainActor func testStoppedTransferCannotCompleteRegeneratedMessage() async throws {
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let user = StoredMessage(topicID: "topic", role: "user", content: "我", status: "pending")
+        let answer = StoredMessage(topicID: user.topicID, role: "assistant", content: "原文", status: "connecting")
+        try await db.enqueue(user); try await db.save(answer)
+        let old = BackgroundReplyJob(messageID: answer.id, topicID: user.topicID, userID: user.id)
+        try await db.registerBackgroundReply(old)
+        let stopped = try await db.finishBackgroundReply(old, reply: nil, stopped: true)
+        XCTAssertEqual(stopped?.status, "stopped"); XCTAssertEqual(stopped?.content, "原文")
+        let next = BackgroundReplyJob(messageID: answer.id, topicID: user.topicID, userID: user.id)
+        try await db.registerBackgroundReply(next)
+        let late = try FinishedReply(data: Data(#"{"choices":[{"message":{"content":"过期结果"}}]}"#.utf8))
+        let ignored = try await db.finishBackgroundReply(old, reply: late)
+        let pending = try await db.pending(), jobs = try await db.backgroundReplies()
+        XCTAssertNil(ignored); XCTAssertEqual(pending, 1); XCTAssertEqual(jobs.map(\.id), [next.id])
     }
 
     @MainActor func testRelaunchCollectsDurableReceiptAndInterruptsMissingTransfer() async throws {
@@ -1593,6 +1610,10 @@ extension PhoneInteractionTests {
 
         let link = try XCTUnwrap(ReplyActivityAttributes(jobID: job.id, topicID: job.topicID, started: Date()).url)
         XCTAssertEqual(ReplyActivityAttributes.topic(in: link), received.topicID)
+        let notification = ReplyPresentation.notification(for: job)
+        XCTAssertEqual(notification.content.userInfo["topicID"] as? String, received.topicID)
+        XCTAssertEqual(notification.identifier, job.id); XCTAssertEqual(notification.content.threadIdentifier, received.topicID)
+        XCTAssertEqual(notification.content.body, "轻点查看这条回复。")
         let plugins = try XCTUnwrap(Bundle.main.builtInPlugInsURL)
         XCTAssertNotNil(Bundle(url: plugins.appendingPathComponent("ReplyActivity.appex")))
     }

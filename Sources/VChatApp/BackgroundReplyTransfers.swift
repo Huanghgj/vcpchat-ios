@@ -37,22 +37,34 @@ import VChatCore
     private var delivered = Set<String>()
     private var completion: (() -> Void)?
     private var finishedEvents = false
-    private var root: URL!
+    private var root: URL?
+    private var configuring = false
+    private var missingAtWake = Set<String>()
 
     func handleWake(_ completion: @escaping () -> Void) {
         self.completion = completion
         finishWakeIfReady()
     }
-    func finishWakeIfReady() {
-        guard finishedEvents, delivered.isEmpty, let completion else { return }
+    func abandonWake() {
+        let handler = completion; completion = nil; finishedEvents = false
+        handler?()
+    }
+    private func finishWakeIfReady() {
+        guard !configuring, finishedEvents, delivered.isEmpty, let completion else { return }
         finishedEvents = false; self.completion = nil; completion()
     }
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        // A completed transfer may no longer appear in allTasks while its delegate
+        // events are still queued. Only classify missing tasks after those events drain.
+        for id in missingAtWake { deliver(Receipt(error: "后台请求已中断，可在原消息上重新生成"), for: id) }
+        missingAtWake.removeAll()
         finishedEvents = true
         finishWakeIfReady()
     }
     func configure(at directory: URL, jobs: [BackgroundReplyJob]) async throws -> [String: Ticket] {
-        root = directory.appendingPathComponent("ReplyTransfers", isDirectory: true)
+        configuring = true
+        defer { configuring = false; finishWakeIfReady() }
+        var root = directory.appendingPathComponent("ReplyTransfers", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
         var values = URLResourceValues(); values.isExcludedFromBackup = true
@@ -61,11 +73,13 @@ import VChatCore
         for item in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) where !ids.contains(item.lastPathComponent) {
             try? FileManager.default.removeItem(at: item)
         }
-        for id in ids { _ = makeTicket(id) }
+        self.root = root
+        for id in ids { _ = makeTicket(id, root: root) }
         let restored = tickets
         let running = await session.allTasks
         for task in running {
             guard let id = task.taskDescription, ids.contains(id) else { task.cancel(); continue }
+            guard task.state != .suspended else { task.cancel(); continue }
             tasks[id] = task
         }
         for (id, ticket) in restored {
@@ -73,12 +87,13 @@ import VChatCore
                let receipt = try? JSONDecoder().decode(Receipt.self, from: data) {
                 deliver(receipt, for: id)
             } else if tasks[id] == nil {
-                deliver(Receipt(error: "后台请求已中断，可在原消息上重新生成"), for: id)
+                if completion != nil && !finishedEvents { missingAtWake.insert(id) }
+                else { deliver(Receipt(error: "后台请求已中断，可在原消息上重新生成"), for: id) }
             }
         }
         return restored
     }
-    private func makeTicket(_ id: String) -> Ticket {
+    private func makeTicket(_ id: String, root: URL) -> Ticket {
         let (events, output) = AsyncStream<Receipt>.makeStream()
         let ticket = Ticket(directory: root.appendingPathComponent(id, isDirectory: true), events: events, output: output)
         tickets[id] = ticket
@@ -88,12 +103,17 @@ import VChatCore
         var call = try request.urlRequest(streaming: false)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        guard let body = call.httpBody else { throw ClientError.invalidConfiguration }; try body.write(to: directory.appendingPathComponent("post"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        guard let body = call.httpBody else { throw ClientError.invalidConfiguration }
+        try body.write(to: directory.appendingPathComponent("post"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         call.httpBody = nil
         return call
     }
-    func submit(_ job: BackgroundReplyJob, request: ChatRequest, room: ChatRoom) async -> Ticket {
-        let ticket = makeTicket(job.id)
+    func submit(_ job: BackgroundReplyJob, request: ChatRequest, room: ChatRoom, store: ChatStore) async throws -> Ticket {
+        guard let root else { throw ClientError.server("后台收回复尚未就绪，请重新打开 App") }
+        try await store.registerBackgroundReply(job)
+        let ticket = makeTicket(job.id, root: root)
+        room.backgroundJobID = job.id
+        if !room.cancelled { ReplyPresentation.start(job) }
         do {
             let call = try await Self.prepare(request, directory: ticket.directory)
             if room.cancelled { deliver(Receipt(stopped: true), for: job.id); return ticket }
@@ -158,6 +178,7 @@ extension ChatViewModel {
     func restoreBackgroundReplies(store: ChatStore, root: URL) async throws {
         let jobs = try await store.backgroundReplies()
         let tickets = try await replyTransfers.configure(at: root, jobs: jobs)
+        await ReplyPresentation.dismissOrphanedActivities(activeIDs: Set(jobs.map(\.id)))
         for job in jobs {
             guard let ticket = tickets[job.id] else { continue }
             let room: ChatRoom
