@@ -199,7 +199,7 @@ private struct BackgroundReplySettings: View {
             Section {
                 Toggle("后台收回复", isOn: $enabled)
             } footer: {
-                Text("开启后，新发出的请求可以在锁屏或切换 App 后继续接收。整条回复到齐后显示；关闭可恢复逐字显示。")
+                Text("前台随服务返回显示回复；锁屏或切换 App 后继续接收。回到聊天会补上已经收到的内容。")
             }
             Section {
                 Toggle("在锁屏与灵动岛显示进度", isOn: $island)

@@ -8,12 +8,17 @@ import VChatCore
     static let modeKey = "native.background-replies"
     static let islandKey = "native.reply-activity"
 
-    static func start(_ job: BackgroundReplyJob) {
+    static func start(id: String, topicID: String) {
         guard UserDefaults.standard.object(forKey: islandKey) as? Bool != false,
-              ActivityAuthorizationInfo().areActivitiesEnabled, UIApplication.shared.applicationState == .active else { return }
-        let attributes = ReplyActivityAttributes(jobID: job.id, topicID: job.topicID, started: Date())
+              ActivityAuthorizationInfo().areActivitiesEnabled, UIApplication.shared.applicationState != .background,
+              !Activity<ReplyActivityAttributes>.activities.contains(where: { $0.attributes.jobID == id && $0.activityState == .active }) else { return }
+        let attributes = ReplyActivityAttributes(jobID: id, topicID: topicID, started: Date())
         _ = try? Activity.request(attributes: attributes, content: ActivityContent(state: .init(phase: .waiting),
             staleDate: Date().addingTimeInterval(600)), pushType: nil)
+    }
+    static func hideWaitingOnReturn() async {
+        let waiting = Activity<ReplyActivityAttributes>.activities.filter { $0.content.state.phase == .waiting }
+        for activity in waiting { await activity.end(nil, dismissalPolicy: .immediate) }
     }
     static func dismissOrphanedActivities(activeIDs: Set<String>) async {
         for activity in Activity<ReplyActivityAttributes>.activities where !activeIDs.contains(activity.attributes.jobID) {
@@ -53,8 +58,22 @@ import VChatCore
 @MainActor final class ReplyAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     let model = ChatViewModel()
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Scene-based apps do not get the legacy app-delegate foreground callbacks.
+        NotificationCenter.default.addObserver(self, selector: #selector(leavingForeground),
+            name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(returningToForeground),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
         UNUserNotificationCenter.current().delegate = self
         return true
+    }
+    @objc private func leavingForeground() {
+        // Start while still foreground-eligible, only for outstanding user requests.
+        for room in model.rooms.values where room.busy && room.receivesInBackground && !room.cancelled {
+            if let id = room.backgroundJobID { ReplyPresentation.start(id: id, topicID: room.id) }
+        }
+    }
+    @objc private func returningToForeground() {
+        Task { await ReplyPresentation.hideWaitingOnReturn() }
     }
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
         guard identifier == BackgroundReplyTransfers.identifier else { completionHandler(); return }

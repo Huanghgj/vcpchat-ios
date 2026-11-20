@@ -58,7 +58,22 @@ public enum VCPMarkup {
         for domain in ToolBatchMarkup.split(source, streaming: streaming) {
             switch domain {
             case .prose(let prose):
-                output += parseLegacy(prose, tokens: protectingHTMLLiterals ? proseWithHTML : proseTokens)
+                // Older servers omit the batch envelope but put its summary
+                // directly after the results. Never associate across prose or a call.
+                var preceding: [Receipt] = []
+                func flushResults() {
+                    for case .result(let value, let done) in preceding { output.append(.result(value, done)) }
+                    preceding.removeAll(keepingCapacity: true)
+                }
+                for block in parseLegacy(prose, tokens: protectingHTMLLiterals ? proseWithHTML : proseTokens) {
+                    switch block {
+                    case .result(let value, let done): preceding.append(.result(value, done))
+                    case .summary(let items, let done) where !preceding.isEmpty:
+                        output.append(.batch(preceding + [.summary(items, done)], done)); preceding.removeAll(keepingCapacity: true)
+                    default: flushResults(); output.append(block)
+                    }
+                }
+                flushResults()
             case .receipt(let body, let closed):
                 // Only summaries and results are structural inside a receipt; other tool output is inert text.
                 let parts: [Receipt] = parseLegacy(body, tokens: receiptTokens).compactMap {

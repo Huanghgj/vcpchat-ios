@@ -59,12 +59,19 @@ jobs:
       - name: Test iPhone interactions and message rendering
         run: |
           set -euo pipefail
+          port_file="$VCHAT_ARTIFACTS/tmp/slow-reply-port"
+          python3 IntegrationTests/slow-reply.py "$port_file" &
+          fixture_pid=$!
+          trap 'kill "$fixture_pid" || true' EXIT
+          for i in {1..50}; do test -s "$port_file" && break; sleep 0.1; done
+          export TEST_RUNNER_VCHAT_STREAM_FIXTURE="http://localhost:$(cat "$port_file")"
           xcodebuild test-without-building -project VChat.xcodeproj -scheme VChat -configuration Debug \
             -destination "platform=iOS Simulator,id=$VCHAT_SIMULATOR" \
             -parallel-testing-enabled NO -derivedDataPath "$VCHAT_ARTIFACTS/tmp/DerivedData" \
             -clonedSourcePackagesDirPath "$VCHAT_ARTIFACTS/tmp/SourcePackages" \
             ARCHS="$(uname -m)" ONLY_ACTIVE_ARCH=YES \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual 2>&1 | tee "$VCHAT_ARTIFACTS/results/phone-tests.log"
+          grep -E "testSystemTransferStreamsBeforeCompletionAndCatchesUp.*passed" "$VCHAT_ARTIFACTS/results/phone-tests.log"
       - name: Save simulator app
         if: ${{ !cancelled() && steps.launch.outcome == 'success' }}
         uses: actions/upload-artifact@v7.0.2

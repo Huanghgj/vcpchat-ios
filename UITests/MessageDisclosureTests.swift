@@ -60,6 +60,7 @@ final class MessageDisclosureTests: XCTestCase {
         tap(4); check([3,4]); XCTAssertTrue(app.staticTexts["九点"].exists)
         tap(3); check([4])
         tap(4); tap(5); check([5]); XCTAssertTrue(app.staticTexts["两次调用成功"].exists)
+        XCTAssertTrue(app.staticTexts["小雨"].exists); XCTAssertTrue(app.staticTexts["九点"].exists)
     }
     @MainActor func testScrolledMessageDoesNotPaintBehindChatHeader() throws {
         let app = XCUIApplication()

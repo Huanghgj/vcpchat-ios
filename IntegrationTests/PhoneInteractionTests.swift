@@ -1556,7 +1556,7 @@ private final class CompletedReplyFixture: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         guard request.httpMethod == "POST", request.url?.path == "/v1/chatvcp/completions",
               request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture",
-              request.value(forHTTPHeaderField: "Accept") == "application/json" else {
+              request.value(forHTTPHeaderField: "Accept") == "text/event-stream" else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse)); return
         }
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type":"application/json"])!
@@ -1588,7 +1588,7 @@ extension PhoneInteractionTests {
         let job = BackgroundReplyJob(messageID: answer.id, topicID: topic.id, userID: user.id)
         let ticket = try await model.replyTransfers.submit(job, request: request, room: room, store: db)
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: ticket.directory.appendingPathComponent("post"))) as? [String: Any])
-        XCTAssertEqual(payload["stream"] as? Bool, false); XCTAssertEqual(payload["contextTokenLimit"] as? Int, 100)
+        XCTAssertEqual(payload["stream"] as? Bool, true); XCTAssertEqual(payload["contextTokenLimit"] as? Int, 100)
         XCTAssertEqual(payload["max_tokens"] as? Int, 12)
         await model.interruptForBackground()
         XCTAssertFalse(room.cancelled)
@@ -1599,6 +1599,45 @@ extension PhoneInteractionTests {
         let pending = try await db.pending()
         XCTAssertNil(duplicate); XCTAssertEqual(pending, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: ticket.directory.path))
+    }
+
+    @MainActor func testSystemTransferStreamsBeforeCompletionAndCatchesUp() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let endpoint = env["VCHAT_STREAM_FIXTURE"], let url = URL(string:endpoint) else {
+            throw XCTSkip("Run with IntegrationTests/slow-reply.py to exercise a real background URLSession")
+        }
+        let (root, db) = try await makeMediaDatabase()
+        defer { try? FileManager.default.removeItem(at:root) }
+        let answer = StoredMessage(topicID:"fixture", role:"assistant", content:"前缀",status:"connecting")
+        try await db.save(answer)
+        let model = ChatViewModel(), room = ChatRoom(id:"fixture",messages:[answer])
+        let config = URLSessionConfiguration.background(withIdentifier:"vchat.integration.stream." + UUID().uuidString)
+        config.isDiscretionary = false
+        model.replyTransfers = BackgroundReplyTransfers(configuration:config)
+        model.store = db; model.rooms[room.id] = room; room.receivesInBackground = true; room.busy = true
+        try await model.restoreBackgroundReplies(store:db, root:root)
+        let job = BackgroundReplyJob(messageID:answer.id,topicID:room.id,userID:nil)
+        let request = ChatRequest(configuration:.init(server:endpoint,model:"fixture"), apiKey:"fixture",messages:[.init(role:"user",content:"fixture")])
+        let ticket = try await model.replyTransfers.submit(job,request:request,room:room,store:db)
+        let collector = Task { await model.collectBackgroundReply(job,ticket:ticket,room:room,store:db) }
+        defer { model.replyTransfers.cancel(job.id) }
+        try await eventually("first small frame actually shown before the server may finish") { room.messages[0].text == "前缀首段" }
+        guard room.messages[0].status == "streaming" else { XCTFail("No incremental foreground delivery"); return }
+        await model.enterBackground()
+        _ = try await URLSession.shared.data(from:url.appendingPathComponent("next"))
+        try await eventually("background bytes arrived but were not yet presented") {
+            let data = try? Data(contentsOf:ticket.directory.appendingPathComponent("response"))
+            return data.flatMap { String(data:$0,encoding:.utf8) }?.contains("补齐") == true
+        }
+        XCTAssertEqual(room.messages[0].text,"前缀首段")
+        await model.enterForeground()
+        try await eventually("catch up without a third frame") { room.messages[0].text == "前缀首段补齐" }
+        XCTAssertEqual(room.messages[0].reasoning,"思考")
+        let (count,_) = try await URLSession.shared.data(from:url.appendingPathComponent("finish"))
+        await collector.value
+        XCTAssertEqual(String(decoding:count,as:UTF8.self),"1")
+        let record = try await db.messages(topicID:room.id).first
+        XCTAssertEqual(record?.content,"前缀首段补齐"); XCTAssertEqual(record?.status,"complete")
     }
 
     @MainActor func testStoppedTransferCannotCompleteRegeneratedMessage() async throws {

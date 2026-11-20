@@ -502,6 +502,15 @@ struct TopicDraft: Codable, Sendable {
     func detach(_ id: String) async {
         room?.attachments.removeAll { $0.id == id }; await flushDraft()
     }
+    private func clearUnsubmittedJob(in room: ChatRoom) {
+        #if os(iOS)
+        if let id = room.backgroundJobID {
+            room.backgroundJobID = nil
+            let phase: ReplyActivityAttributes.ContentState.Phase = room.cancelled ? .stopped : .interrupted
+            Task { await ReplyPresentation.end(id, phase: phase) }
+        }
+        #endif
+    }
     func send(onDraftCleared: @escaping @MainActor () -> Void = {}) {
         guard !synchronizing else { error = "请等待同步完成或取消后再修改会话"; return }
         guard let room, let topic = activeTopic, !room.busy, (!room.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !room.attachments.isEmpty), let store else { return }
@@ -512,6 +521,7 @@ struct TopicDraft: Codable, Sendable {
         let user = StoredMessage(topicID: room.id, authorName: profile.name.isEmpty ? "我" : profile.name, role: "user", content: content, status: "pending", attachments: room.attachments)
         let config = configuration, key = apiKey, profile = profile, rules = regexRules, replies = replySettings
         room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
+        if room.receivesInBackground && !speakers.isEmpty { room.backgroundJobID = UUID().uuidString }
         room.generation = Task {
             var currentReply: MessageViewModel?
             do {
@@ -547,6 +557,7 @@ struct TopicDraft: Codable, Sendable {
                     do { try await store.save(assistant.record) } catch { room.error = "\(room.error ?? "")；本机保存失败：\(error.localizedDescription)" }
                 }
             }
+            clearUnsubmittedJob(in: room)
             room.busy = false; room.generation = nil
             if room.needsExternalReload { await reloadTopicTools(changedID: room.id) }
             room.pendingCount = room.messages.filter { $0.status == "pending" }.count
@@ -564,8 +575,8 @@ struct TopicDraft: Codable, Sendable {
         }
         #if os(iOS)
         if room.receivesInBackground {
-            let job = BackgroundReplyJob(messageID: assistant.id, topicID: room.id, userID: acceptedUser)
-            room.connection = "正在等待后台回复"
+            let job = BackgroundReplyJob(id: room.backgroundJobID ?? UUID().uuidString, messageID: assistant.id, topicID: room.id, userID: acceptedUser)
+            room.connection = "正在接收回复"
             let ticket = try await replyTransfers.submit(job, request: request, room: room, store: store)
             await collectBackgroundReply(job, ticket: ticket, room: room, store: store)
             return
@@ -594,8 +605,9 @@ struct TopicDraft: Codable, Sendable {
         let prefix = continuing ? message.text : "", reasoning = continuing ? message.reasoning : ""
         let history = (continuing ? room.messages : Array(room.messages.dropLast())).map(\.record)
         room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.cancellation = nil; room.error = nil
+        if room.receivesInBackground { room.backgroundJobID = UUID().uuidString }
         room.generation = Task {
-            defer { room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
+            defer { clearUnsubmittedJob(in: room); room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
             do {
                 let locationPreference = room.locationPreference
                 let locationContext = await prepareLocation(for: [agent],preference: locationPreference)
@@ -648,6 +660,9 @@ struct TopicDraft: Codable, Sendable {
     }
     func enterBackground() async {
         backgrounded = true
+        #if os(iOS)
+        replyTransfers.setDisplaying(false)
+        #endif
         await flushDraft(); guard !Task.isCancelled else { return }
         for room in Array(rooms.values) { await room.session.setBackgroundPacing(true) }
         await activity.pause(); await fileNode.pause()
@@ -667,6 +682,9 @@ struct TopicDraft: Codable, Sendable {
     func enterForeground() async {
         let wasBackgrounded = backgrounded
         backgrounded = false
+        #if os(iOS)
+        replyTransfers.setDisplaying(true)
+        #endif
         for room in Array(rooms.values) { await room.session.setBackgroundPacing(false) }
         if wasBackgrounded {
             if credentialsLocked { await loadCredentials(allowInteraction: false) }

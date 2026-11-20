@@ -14,7 +14,8 @@ struct VCPCardView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
                         Group { switch part {
-                        case .summary(let items, let done): ToolSummary(items:items, closed:done, motion:options.motion)
+                        case .summary(let items, let done): ToolSummary(items:items, closed:done, motion:options.motion,
+                            results: results(before:index, in:parts))
                         case .result(let result, let done): resultCard(result, closed:done, plain:true)
                         case .note(let text):
                             FoldedCard(kind:"note",title:"工具结果",icon:"doc.text",subtitle:"",initiallyOpen:false,motion:options.motion) {
@@ -54,6 +55,10 @@ struct VCPCardView: View {
             FoldedCard(kind:"push",title: "桌面推送", icon: "desktopcomputer", subtitle: closed ? "仅展示，不执行" : "接收中", initiallyOpen: false,motion: options.motion) { Text(verbatim: text).font(.callout.monospaced()).modifier(MessageTextSelection()) }
         }
     }
+    private func results(before index: Int, in parts: [VCPMarkup.Receipt]) -> [VCPMarkup.Result] {
+        let start = parts[..<index].lastIndex { if case .summary = $0 { return true }; return false }.map { $0 + 1 } ?? 0
+        return parts[start..<index].compactMap { if case .result(let value, _) = $0 { return value }; return nil }
+    }
     @ViewBuilder private func resultCard(_ result: VCPMarkup.Result, closed: Bool, plain: Bool) -> some View {
         let title = result.tool.isEmpty ? "工具结果" : "工具结果 · " + result.tool
         let icon = result.ok == false ? "exclamationmark.triangle" : "doc.text"
@@ -79,10 +84,23 @@ struct VCPCardView: View {
 
 private struct ToolSummary: View {
     let items: [String]; let closed: Bool; let motion: Bool
+    var results: [VCPMarkup.Result] = []
     var body: some View {
-        FoldedCard(kind:"summary",title:"本轮工具调用摘要",icon:"checklist",subtitle:closed ? "执行状态" : "接收中",initiallyOpen:!closed,motion:motion) {
+        FoldedCard(kind:"summary",title:"本轮工具调用摘要",icon:"checklist",subtitle:closed ? (results.isEmpty ? "执行状态" : "\(results.count) 份结果") : "接收中",initiallyOpen:!closed,motion:motion) {
             VStack(alignment:.leading,spacing:6) {
                 ForEach(Array(items.enumerated()),id:\.offset) { _, item in Text(verbatim:item).font(.callout) }
+                ForEach(Array(results.enumerated()),id:\.offset) { _, result in
+                    Divider()
+                    Text(result.tool.isEmpty ? "返回结果" : result.tool).font(.caption.weight(.semibold))
+                    ForEach(Array(result.fields.enumerated()),id:\.offset) { _, field in
+                        Text(verbatim: field.key + "：" + field.value).modifier(MessageTextSelection())
+                    }
+                    if !result.content.isEmpty { Text(verbatim:result.content).modifier(MessageTextSelection()) }
+                    else if result.fields.isEmpty { Text("没有返回正文。").font(.caption).foregroundStyle(.secondary) }
+                }
+                if closed && results.isEmpty {
+                    Text("这条摘要没有附带结果正文。连接 VCP 时可在「服务器与模型」选择「VCP 工具模式」，对新请求生效。").font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
