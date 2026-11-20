@@ -33,13 +33,16 @@ import VChatCore
     }
     static func notify(_ job: BackgroundReplyJob) async {
         guard UIApplication.shared.applicationState != .active else { return }
-        let center = UNUserNotificationCenter.current()
         let status = await authorizationStatus()
         guard [.authorized, .provisional, .ephemeral].contains(status),
               UIApplication.shared.applicationState != .active else { return }
-        try? await center.add(notification(for: job))
+        await enqueueNotification(for: job)
     }
-    static func notification(for job: BackgroundReplyJob) -> UNNotificationRequest {
+    nonisolated private static func enqueueNotification(for job: BackgroundReplyJob) async {
+        let request = notification(for: job)
+        try? await UNUserNotificationCenter.current().add(request)
+    }
+    nonisolated static func notification(for job: BackgroundReplyJob) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = "AI 回复已收到"; content.body = "轻点查看这条回复。"
         content.sound = .default; content.threadIdentifier = job.topicID; content.userInfo = ["topicID": job.topicID]
