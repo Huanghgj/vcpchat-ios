@@ -448,22 +448,38 @@ struct HTMLIsland: View {
     private var document: String {
         HTMLIslandPolicy.shell(options: options, environment: environment)
     }
-    var body: some View {
-        Group {
-            if let controller, let view = controller.view {
-                #if os(iOS)
-                IslandNativeView(view: view, showActions: showMessageActions, selectPhoto: options.media ? { selectedPhoto = $0 } : nil)
-                    .id(ObjectIdentifier(view)).frame(height: controller.height)
-                #else
-                IslandNativeView(view: view,showActions: showMessageActions).id(ObjectIdentifier(view)).frame(height: controller.height)
-                #endif
-            }
-            else if let controller, controller.failed { Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height) }
-            else { Color.clear.frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight).accessibilityHidden(true) }
+    #if os(iOS)
+    private var selectCardPhoto: (@MainActor (CardPhoto) -> Void)? {
+        guard options.media else { return nil }
+        return { (photo: CardPhoto) in selectedPhoto = photo }
+    }
+    #endif
+    @ViewBuilder private var surface: some View {
+        if let controller, let view = controller.view {
+            #if os(iOS)
+            IslandNativeView(view: view, showActions: showMessageActions, selectPhoto: selectCardPhoto)
+                .id(ObjectIdentifier(view)).frame(height: controller.height)
+            #else
+            IslandNativeView(view: view, showActions: showMessageActions)
+                .id(ObjectIdentifier(view)).frame(height: controller.height)
+            #endif
+        } else if let controller, controller.failed {
+            Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height)
+        } else {
+            Color.clear.frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight).accessibilityHidden(true)
         }
+    }
+    private var photoSurface: some View {
         #if os(iOS)
-        .sheet(item: $selectedPhoto) { photo in CardPhotoPreview(photo: photo, owner: owner, stickers: stickers) }
+        surface.sheet(item: $selectedPhoto) { (photo: CardPhoto) in
+            CardPhotoPreview(photo: photo, owner: owner, stickers: stickers)
+        }
+        #else
+        surface
         #endif
+    }
+    var body: some View {
+        photoSurface
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onGeometryChange(for: Visibility.self,of: { [viewport] g in
             let rect=g.frame(in:.named("vcp-message-viewport"))
