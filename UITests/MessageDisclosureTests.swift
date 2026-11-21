@@ -89,7 +89,15 @@ final class MessageDisclosureTests: XCTestCase {
             }
             let save = app.buttons["保存到照片"].firstMatch
             XCTAssertTrue(save.waitForExistence(timeout: 15)); save.tap()
-            XCTAssertTrue(app.alerts["已保存到照片"].waitForExistence(timeout: 20))
+            let permission = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons
+                .matching(NSPredicate(format: "label IN %@", ["Allow", "Allow Add Only", "允许", "只允许添加照片"])).firstMatch
+            if permission.waitForExistence(timeout: 2) { permission.tap() }
+            let saved = app.alerts.containing(.staticText, identifier: "已保存到照片").firstMatch
+            guard saved.waitForExistence(timeout: 20) else {
+                let alerts = app.state == .runningForeground ? app.alerts.allElementsBoundByIndex.map(\.label) : []
+                XCTFail("Photo write failed (HTML=\(html), appState=\(app.state.rawValue), alerts=\(alerts))")
+                return
+            }
             app.alerts.buttons["好"].tap()
         }
     }

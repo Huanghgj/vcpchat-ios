@@ -44,6 +44,7 @@ jobs:
           set -euo pipefail
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,group in d["devices"].items() if "iOS-26" in runtime for x in group if "Pro" in x["name"] and "iPhone" in x["name"]))')
           echo "VCHAT_SIMULATOR=$device" >> "$GITHUB_ENV"
+          xcrun simctl boot "$device" || true # let the simulator start during compilation
       - name: Build the simulator app and its tests together
         run: |
           set -euo pipefail
@@ -58,7 +59,6 @@ jobs:
         run: |
           set -euo pipefail
           device="$VCHAT_SIMULATOR"
-          xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
           app="$VCHAT_ARTIFACTS/tmp/DerivedData/Build/Products/Debug-iphonesimulator/VChat.app"
           xcrun simctl install "$device" "$app"
@@ -103,9 +103,12 @@ jobs:
           for scenario in testSaveMarkdownAndHTMLPhotosFromChat testSystemTransferStreamsBeforeCompletionAndCatchesUp testHomeDuringStreamThenReturnBeforeFinish testServerReplySurvivesProcessLossWithoutSecondGeneration testServerReplyUsesDownloadedArchiveWhenLiveReaderIsUnavailable; do
             grep -E "${scenario}.*passed" "$VCHAT_ARTIFACTS/results/phone-tests.log"
           done
-      - name: Inspect isolated reply fixtures after an interaction failure
+      - name: Collect simulator failure diagnostics
         if: failure() && steps.launch.outcome == 'success'
         run: |
+          mkdir -p "$VCHAT_ARTIFACTS/results/crashes"
+          find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'VChat-*.ips' -exec cp {} "$VCHAT_ARTIFACTS/results/crashes/" \; || true
+          xcrun simctl spawn "$VCHAT_SIMULATOR" log show --last 20m --predicate 'process == "tccd" AND eventMessage CONTAINS "app.vcpchat.native"' --style compact > "$VCHAT_ARTIFACTS/results/photo-privacy.log"
           container=$(xcrun simctl get_app_container "$VCHAT_SIMULATOR" app.vcpchat.native data)
           python3 IntegrationTests/ReplySync/inspect-fixture.py "$container" | tee "$VCHAT_ARTIFACTS/results/reply-fixtures.log"
           xcrun simctl spawn "$VCHAT_SIMULATOR" log show --last 20m --predicate 'subsystem == "app.vcpchat.native.fixture"' --style compact > "$VCHAT_ARTIFACTS/results/reply-recovery.log"

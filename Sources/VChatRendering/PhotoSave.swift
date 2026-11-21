@@ -4,14 +4,17 @@ import Photos
 
 /// Write the encoded source so Photos receives the original dimensions, EXIF
 /// orientation and animation. No access to existing photos is needed.
-@MainActor private enum ChatPhotoLibrary {
-    static func save(_ data: Data) async throws {
+private enum ChatPhotoLibrary {
+    nonisolated static func save(_ data: Data) async throws {
         var auth = PHPhotoLibrary.authorizationStatus(for: .addOnly)
         if auth == .notDetermined { auth = await PHPhotoLibrary.requestAuthorization(for: .addOnly) }
         guard auth == .authorized || auth == .limited else { throw SaveError.permission }
-        try await PHPhotoLibrary.shared().performChanges {
+        // PhotoKit executes the change block on its own queue. Keep it free of
+        // MainActor isolation even when a SwiftUI button initiates the save.
+        let change: @Sendable () -> Void = {
             PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
         }
+        try await PHPhotoLibrary.shared().performChanges(change)
     }
     enum SaveError: Error { case permission }
 }
