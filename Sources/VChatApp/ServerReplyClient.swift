@@ -1,6 +1,7 @@
 #if os(iOS)
 import Foundation
 import CryptoKit
+import OSLog
 import VChatCore
 
 /// One server-owned generation. Only the initial, user-initiated path may PUT.
@@ -12,6 +13,16 @@ import VChatCore
     static let taskPrefix = "server-result:"
     private static let limit = 16 * 1024 * 1024
 
+    // Diagnostic events exist only in a synthetic simulator relaunch. Log no
+    // endpoint, grant, IDs or message content, even for the fixture.
+    static func trace(_ message: @autoclosure () -> String) {
+        #if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["VCHAT_TEST_SYNC_SESSION"] != nil {
+            let line = message()
+            Logger(subsystem: "app.vcpchat.native.fixture", category: "recovery").notice("\(line, privacy: .public)")
+        }
+        #endif
+    }
     struct Access: Codable, Sendable {
         var url: URL, key: String, proof: String
         func request(method: String, suffix: String = "", offset: Int? = nil) -> URLRequest {
@@ -71,6 +82,7 @@ import VChatCore
         guard page.id.lowercased()==id.lowercased(), ["running","complete","stopped","interrupted"].contains(page.state),
               page.offset >= 0, page.next >= page.offset, page.next <= Self.limit,
               page.next - page.offset == page.data.count else { throw Failure.invalid }
+        Self.trace("apply archive=\(archive) state=\(page.state) position=\(position) offset=\(page.offset) next=\(page.next)")
         if archive {
             guard page.offset==0, page.state != "running", position<=page.next else { throw Failure.invalid }
         } else if page.offset != position { throw Failure.invalid }
@@ -119,6 +131,7 @@ import VChatCore
                 do {
                     if access == nil {
                         let value=try await vault.read(Self.account(id),allowingInteraction:false)
+                        Self.trace("grant loaded=\(!value.isEmpty)")
                         guard !value.isEmpty else { complete("这条回复的本机凭据已丢失；不会自动重发。"); return }
                         access=try JSONDecoder().decode(Access.self,from:Data(value.utf8))
                     }
@@ -144,6 +157,7 @@ import VChatCore
                     tries=0
                 } catch {
                     guard !done, !Task.isCancelled, epoch==own else { return }
+                    Self.trace("reader error type=\(type(of: error)) code=\((error as NSError).code)")
                     if case Failure.http(let status) = error, (400..<500).contains(status), status != 429 {
                         if status != 404 || tries >= 2 {
                             complete("VCP 续传服务返回 HTTP \(status)。请检查插件、密钥或记录保留时间；不会自动重发。"); return

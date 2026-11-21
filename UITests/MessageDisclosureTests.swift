@@ -116,13 +116,24 @@ final class MessageDisclosureTests: XCTestCase {
         guard send.waitForExistence(timeout:20) else { XCTFail("Missing composer"); return }
         send.tap()
         guard app.staticTexts["首段"].waitForExistence(timeout:20) else { XCTFail("Missing live server prefix"); return }
+        let authors = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-author-"))
+        let original = authors.firstMatch.identifier
+        XCTAssertFalse(original.isEmpty)
         app.terminate()
         let (body,_)=try await URLSession.shared.data(from:url.appendingPathComponent("release").appendingPathComponent(id))
         XCTAssertEqual(String(decoding:body,as:UTF8.self),"1")
         app.launch()
-        guard app.staticTexts["首段后台完成"].waitForExistence(timeout:25) else { XCTFail("The original reply did not recover"); return }
+        guard app.staticTexts["首段后台完成"].waitForExistence(timeout:25) else {
+            XCTFail("Recovery failed: author=\(app.staticTexts[original].exists), composer=\(send.exists), busy=\(app.buttons["停止生成"].exists), prefix=\(app.staticTexts["首段"].exists), interrupted=\(app.staticTexts["已中断 · 内容已保留"].exists)")
+            return
+        }
         XCTAssertTrue(send.waitForExistence(timeout:15))
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format:"label == %@", "首段后台完成")).count,1)
+        XCTAssertEqual(authors.count, 1)
+        XCTAssertEqual(authors.firstMatch.identifier, original)
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.staticTexts["首段后台完成"].waitForExistence(timeout: 20), "The restored reply must also be committed to disk")
+        XCTAssertEqual(authors.firstMatch.identifier, original)
         let (count,_)=try await URLSession.shared.data(from:url.appendingPathComponent("count").appendingPathComponent(id))
         XCTAssertEqual(String(decoding:count,as:UTF8.self),"1")
     }

@@ -280,7 +280,7 @@ private struct NativeMessageRow: View {
             VStack(alignment: .leading,spacing: 9) {
                 if message.role == "assistant" {
                     let author = model.authorAgent(for: message),name = message.authorName.isEmpty ? author?.name ?? "助手" : message.authorName
-                    HStack(spacing: 8) { ContactAvatar(name: name,image: author?.avatarUrl ?? "",size: 24); Text(name).font(.system(size: 13,weight: .semibold)); Spacer(); if streaming { Circle().fill(palette.accent).frame(width: 6,height: 6); Text("正在回复").font(.system(size: 11)) } else if ["interrupted","stopped"].contains(message.status) { Text(message.status == "interrupted" ? "已中断 · 内容已保留" : "已停止").font(.system(size: 11)) } }.foregroundStyle(palette.muted)
+                    HStack(spacing: 8) { ContactAvatar(name: name,image: author?.avatarUrl ?? "",size: 24); Text(name).font(.system(size: 13,weight: .semibold)).accessibilityIdentifier("assistant-author-" + message.id); Spacer(); if streaming { Circle().fill(palette.accent).frame(width: 6,height: 6); Text("正在回复").font(.system(size: 11)) } else if ["interrupted","stopped"].contains(message.status) { Text(message.status == "interrupted" ? "已中断 · 内容已保留" : "已停止").font(.system(size: 11)) } }.foregroundStyle(palette.muted)
                 }
                 MessageActions(message: message,model: model) {
                     VStack(alignment: .leading,spacing: 12) {

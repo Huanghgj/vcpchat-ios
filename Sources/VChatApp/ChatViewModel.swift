@@ -228,7 +228,9 @@ struct TopicDraft: Codable, Sendable {
            let url = URL(string:endpoint), url.scheme == "http", url.host == "localhost" {
             do {
                 let testID=ProcessInfo.processInfo.environment["VCHAT_TEST_SYNC_SESSION"].flatMap(UUID.init(uuidString:))
-                let root = FileManager.default.temporaryDirectory.appendingPathComponent((testID ?? UUID()).uuidString)
+                let container = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                    appropriateFor: nil, create: true)
+                let root = container.appendingPathComponent("ReplySyncFixtures").appendingPathComponent((testID ?? UUID()).uuidString)
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 let database = try await ChatStore.open(path:root.appendingPathComponent("chat.sqlite").path)
                 let agent = VCPAgent(id:"fixture",name:"测试"), topic = ChatTopic(id:"fixture-topic",ownerId:"fixture",title:"流式接收测试")

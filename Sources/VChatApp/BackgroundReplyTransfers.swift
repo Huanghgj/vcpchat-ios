@@ -103,6 +103,7 @@ import VChatCore
             if FileManager.default.fileExists(atPath:ticket.directory.appendingPathComponent(ServerReplyClient.marker).path),
                let vault { remote[id]=serverClient(id, ticket:ticket, vault:vault) }
         }
+        ServerReplyClient.trace("configure jobs=\(jobs.count) marked=\(remote.count)")
         let restored = tickets
         let running = (!reconnectLegacy || (jobs.isEmpty && completion == nil)) ? [] : await legacySession.allTasks
         for task in running {
@@ -379,6 +380,7 @@ extension ChatViewModel {
                         issue = ClientError.tooLarge.localizedDescription
                         record = try await store.finishBackgroundReply(job, reply: nil)
                     }
+                    ServerReplyClient.trace("commit length=\(record?.content.utf8.count ?? -1) status=\(record?.status ?? "missing")")
                     committed = true
                     guard let record else { return }
                     if let message = room.messages.first(where: { $0.id == record.id }) {
