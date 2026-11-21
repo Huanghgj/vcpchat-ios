@@ -9,6 +9,30 @@ import SQLite3
 @testable import VChat
 
 final class PhoneInteractionTests: XCTestCase {
+    @MainActor func testEndpointModeSurvivesReopenWithoutSavingDraftServerOrUnlockingKeys() throws {
+        let defaults = UserDefaults.standard, modeKey = ChatViewModel.endpointModePreference
+        let oldConfig = defaults.object(forKey: "native.connection"), oldMode = defaults.object(forKey: modeKey)
+        let oldOrigin = defaults.object(forKey: "native.sticker-account-origin")
+        defer {
+            defaults.set(oldConfig, forKey: "native.connection"); defaults.set(oldMode, forKey: modeKey)
+            defaults.set(oldOrigin, forKey: "native.sticker-account-origin")
+        }
+        defaults.removeObject(forKey: modeKey)
+        let saved = ConnectionConfiguration(server: "https://saved.invalid", model: "test", endpointMode: .vcpTools)
+        defaults.set(try JSONEncoder().encode(saved), forKey: "native.connection")
+        let model = ChatViewModel()
+        XCTAssertEqual(model.configuration.endpointMode, .vcpTools) // existing installations
+        model.configuration.server = "https://unsaved.invalid"
+        model.credentialsLocked = true
+        for mode in [EndpointMode.standard, .vcpTools] {
+            model.selectEndpointMode(mode)
+            let reopened = ChatViewModel().configuration
+            XCTAssertEqual(reopened.server, saved.server)
+            XCTAssertEqual(reopened.model, saved.model)
+            XCTAssertEqual(try reopened.chatEndpoint().path, mode == .vcpTools ? "/v1/chatvcp/completions" : "/v1/chat/completions")
+        }
+    }
+
     @MainActor private func host<V: View>(_ content: V) throws -> UIWindow {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let window = UIWindow(windowScene: scene)

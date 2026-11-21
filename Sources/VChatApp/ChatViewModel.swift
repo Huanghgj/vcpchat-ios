@@ -130,6 +130,13 @@ struct TopicDraft: Codable, Sendable {
     var services = ServiceSettings()
     var serviceSecrets: [ServiceSecret: String] = [:]
     var configuration: ConnectionConfiguration
+    static let endpointModePreference = "native.endpoint-mode"
+    // Changing the route must not require Keychain access or commit other edits
+    // in the connection form (especially an unconfirmed server address).
+    func selectEndpointMode(_ mode: EndpointMode) {
+        configuration.endpointMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.endpointModePreference)
+    }
     var apiKey = ""
     var logKey = ""
     var models: [String] = []
@@ -197,6 +204,8 @@ struct TopicDraft: Codable, Sendable {
         self.vault = vault ?? CredentialVault(persistence: storage)
         if let data = UserDefaults.standard.data(forKey: "native.connection"), let saved = try? JSONDecoder().decode(ConnectionConfiguration.self, from: data) { configuration = saved }
         else { configuration = ConnectionConfiguration() }
+        if let value = UserDefaults.standard.string(forKey: Self.endpointModePreference),
+           let mode = EndpointMode(rawValue: value) { configuration.endpointMode = mode }
         if UserDefaults.standard.data(forKey:"native.connection") != nil {
             savedImageOrigin = StickerDirectories.origin(try? configuration.baseURL())
             // Migrate the existing saved account once, never an unsaved server field.
@@ -461,6 +470,7 @@ struct TopicDraft: Codable, Sendable {
         do {
             let imported = try await DesktopConnection.read(from: url)
             var config = imported.configuration; config.model = imported.preferredModel ?? configuration.model
+            config.endpointMode = configuration.endpointMode // desktop imports contain no route preference
             configuration = config; apiKey = imported.apiKey; logKey = imported.logKey
             if let key = imported.fileKey { serviceSecrets[.fileKey] = key }
             if let sync = imported.syncSettings,let token = imported.syncToken {
