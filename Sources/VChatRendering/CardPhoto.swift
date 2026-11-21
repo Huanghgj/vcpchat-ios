@@ -47,7 +47,8 @@ struct CardPhoto: Identifiable {
 struct CardPhotoPreview: View {
     let photo: CardPhoto, owner: TopicMediaScope?, stickers: StickerContext
     @Environment(\.dismiss) private var dismiss
-    @State private var image: MediaRaster?, failed = false
+    @State private var image: MediaRaster?
+    @State private var failed = false
     var body: some View {
         Group {
             if let image { RasterViewer(image: image.image, title: photo.title, animation: image.animation, original: image.original) }

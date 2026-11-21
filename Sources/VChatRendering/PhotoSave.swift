@@ -17,7 +17,8 @@ import Photos
 }
 
 @MainActor @Observable private final class PhotoSaveState {
-    var saving = false, notice: String?
+    var saving = false
+    var notice: String?
     func save(_ data: Data) {
         guard !saving else { return }
         saving = true
