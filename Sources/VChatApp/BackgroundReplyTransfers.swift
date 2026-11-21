@@ -159,7 +159,7 @@ import VChatCore
         do {
             let call = try await Self.prepare(request, directory: ticket.directory)
             if room.cancelled {
-                if room.cancellation == .interrupted { interrupt(job.id) } else { cancel(job.id) }
+                cancel(job.id)
                 return ticket
             }
             if room.serverOwnsReply {
@@ -179,11 +179,6 @@ import VChatCore
             deliver(Receipt(error: error.localizedDescription), for: job.id)
         }
         return ticket
-    }
-    func interrupt(_ id: String) {
-        guard remote[id] == nil else { return } // a local runtime expiry is never a remote stop
-        tasks[id]?.cancel()
-        deliver(Receipt(error: "系统已结束后台运行，已收到的内容已保留。"), for: id)
     }
     func cancel(_ id: String) {
         if let client=remote[id] { client.stop(); return }
@@ -344,14 +339,13 @@ extension ChatViewModel {
     func collectBackgroundReply(_ job: BackgroundReplyJob, ticket: BackgroundReplyTransfers.Ticket, room: ChatRoom, store: ChatStore) async {
         var committed = false
         defer {
-            room.finishedSpeakerBytes += room.receivedReplyBytes
             room.backgroundJobID = nil; room.receivedReplyBytes = 0
             replyTransfers.acknowledge(job.id, committed: committed)
         }
         let reader = ReplyStreamReader(ticket.directory)
         let message = room.messages.first { $0.id == job.messageID }
         let prefix = message?.text ?? "", reasoningPrefix = message?.reasoning ?? ""
-        var nextIslandUpdate: ContinuousClock.Instant?, nextBackgroundUpdate: ContinuousClock.Instant?
+        var nextBackgroundUpdate: ContinuousClock.Instant?
         for await event in ticket.events {
             switch event {
             case .bytesAvailable:
@@ -362,10 +356,6 @@ extension ChatViewModel {
                     let bytes = live.text.utf8.count + live.reasoning.utf8.count
                     room.receivedReplyBytes = bytes
                     let now = ContinuousClock.now
-                    if nextIslandUpdate.map({ now >= $0 }) ?? true {
-                        nextIslandUpdate = now + .seconds(1)
-                        if let turn = room.replyRuntimeID { ReplyRuntime.progress(turn,bytes:room.finishedSpeakerBytes + bytes) }
-                    }
                     if backgrounded, nextBackgroundUpdate.map({ now >= $0 }) ?? true {
                         nextBackgroundUpdate = now + .seconds(2)
                         await updateReplyActivity(job.id, bytes)

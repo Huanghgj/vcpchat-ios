@@ -42,8 +42,6 @@ import VChatRendering
     var busy = false
     var serverOwnsReply = false
     var receivesInBackground = false
-    @ObservationIgnored var replyRuntimeID: String?
-    @ObservationIgnored var finishedSpeakerBytes = 0
     @ObservationIgnored var receivedReplyBytes = 0
     var backgroundJobID: String?
     var cancellation: SessionState?
@@ -530,26 +528,10 @@ struct TopicDraft: Codable, Sendable {
         room?.attachments.removeAll { $0.id == id }; await flushDraft()
     }
     private func reserveReply(in room: ChatRoom) {
-        let id = UUID().uuidString
-        room.backgroundJobID = id
-        #if os(iOS)
-        guard !room.serverOwnsReply, room.replyRuntimeID == nil else { return } // one user gesture can start a group turn
-        room.replyRuntimeID = id; room.finishedSpeakerBytes = 0
-        // Only a send/regenerate gesture creates a new generation. An expiring
-        // system task must never restart the model or execute its tools again.
-        ReplyRuntime.begin(id) { [weak self, weak room] in
-            guard let self, let room, room.replyRuntimeID == id else { return }
-            room.cancellation = .interrupted
-            if let active = room.backgroundJobID { self.replyTransfers.interrupt(active) }
-        }
-        #endif
+        room.backgroundJobID = UUID().uuidString
     }
-    private func finishReplyTurn(in room: ChatRoom, success: Bool) {
+    private func finishReplyTurn(in room: ChatRoom) {
         #if os(iOS)
-        if let id = room.replyRuntimeID {
-            ReplyRuntime.finish(id, success: success && !room.cancelled)
-            room.replyRuntimeID = nil; room.finishedSpeakerBytes = 0
-        }
         if let id = room.backgroundJobID {
             room.backgroundJobID = nil
             let phase: ReplyActivityAttributes.ContentState.Phase = room.cancelled ? .stopped : .interrupted
@@ -603,7 +585,7 @@ struct TopicDraft: Codable, Sendable {
                     do { try await store.save(assistant.record) } catch { room.error = "\(room.error ?? "")；本机保存失败：\(error.localizedDescription)" }
                 }
             }
-            finishReplyTurn(in:room, success:currentReply?.status == "complete" && room.error == nil)
+            finishReplyTurn(in:room)
             room.busy = false; room.generation = nil
             if room.needsExternalReload { await reloadTopicTools(changedID: room.id) }
             room.pendingCount = room.messages.filter { $0.status == "pending" }.count
@@ -654,7 +636,7 @@ struct TopicDraft: Codable, Sendable {
         room.busy = true; room.receivesInBackground = prefersBackgroundReplies; room.serverOwnsReply = room.receivesInBackground && prefersServerReplies; room.cancellation = nil; room.error = nil
         if room.receivesInBackground { reserveReply(in:room) }
         room.generation = Task {
-            defer { finishReplyTurn(in:room,success:message.status == "complete" && room.error == nil); room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
+            defer { finishReplyTurn(in:room); room.busy = false; room.generation = nil; room.pendingCount = room.messages.filter { $0.status == "pending" }.count; if room.needsExternalReload { Task { await self.reloadTopicTools(changedID: room.id) } } }
             do {
                 let locationPreference = room.locationPreference
                 let locationContext = await prepareLocation(for: [agent],preference: locationPreference)
