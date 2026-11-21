@@ -12,16 +12,16 @@ struct VCPCardView: View {
                 Label("正在接收工具结果", systemImage: "ellipsis").font(.caption).foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
-                        Group { switch part {
+                    ForEach(rows(for: parts)) { row in
+                        Group { switch row.part {
                         case .summary(let items, let done): ToolSummary(items:items, closed:done, motion:options.motion,
-                            results: results(before:index, in:parts))
+                            results: row.results)
                         case .result(let result, let done): resultCard(result, closed:done, plain:true)
                         case .note(let text):
                             FoldedCard(kind:"note",title:"工具结果",icon:"doc.text",subtitle:"",initiallyOpen:false,motion:options.motion) {
                                 Text(verbatim:text).font(.callout).modifier(MessageTextSelection())
                             }
-                        } }.environment(\.parentIsland, parentIsland?.child("receipt-\(index)"))
+                        } }.environment(\.parentIsland, parentIsland?.child("receipt-\(row.id)"))
                     }
                 }
             }
@@ -55,9 +55,29 @@ struct VCPCardView: View {
             FoldedCard(kind:"push",title: "桌面推送", icon: "desktopcomputer", subtitle: closed ? "仅展示，不执行" : "接收中", initiallyOpen: false,motion: options.motion) { Text(verbatim: text).font(.callout.monospaced()).modifier(MessageTextSelection()) }
         }
     }
-    private func results(before index: Int, in parts: [VCPMarkup.Receipt]) -> [VCPMarkup.Result] {
-        let start = parts[..<index].lastIndex { if case .summary = $0 { return true }; return false }.map { $0 + 1 } ?? 0
-        return parts[start..<index].compactMap { if case .result(let value, _) = $0 { return value }; return nil }
+    private struct ReceiptRow: Identifiable {
+        let id: Int
+        let part: VCPMarkup.Receipt
+        var results: [VCPMarkup.Result] = []
+    }
+    // VCP sends detail records immediately before their summary. Give each
+    // record exactly one home; keep standalone or unfinished results visible.
+    private func rows(for parts: [VCPMarkup.Receipt]) -> [ReceiptRow] {
+        var rows: [ReceiptRow] = [], pending: [ReceiptRow] = []
+        for (index, part) in parts.enumerated() {
+            var row = ReceiptRow(id: index, part: part)
+            switch part {
+            case .result(_, true):
+                pending.append(row); continue
+            case .summary:
+                row.results = pending.compactMap { if case .result(let result, _) = $0.part { return result }; return nil }
+            default:
+                rows.append(contentsOf: pending)
+            }
+            pending.removeAll(keepingCapacity: true)
+            rows.append(row)
+        }
+        return rows + pending
     }
     @ViewBuilder private func resultCard(_ result: VCPMarkup.Result, closed: Bool, plain: Bool) -> some View {
         let title = result.tool.isEmpty ? "工具结果" : "工具结果 · " + result.tool
@@ -91,7 +111,10 @@ private struct ToolSummary: View {
                 ForEach(Array(items.enumerated()),id:\.offset) { _, item in Text(verbatim:item).font(.callout) }
                 ForEach(Array(results.enumerated()),id:\.offset) { _, result in
                     Divider()
-                    Text(result.tool.isEmpty ? "返回结果" : result.tool).font(.caption.weight(.semibold))
+                    HStack {
+                        Text(result.tool.isEmpty ? "返回结果" : result.tool).font(.caption.weight(.semibold))
+                        if !result.status.isEmpty { Text(result.status).font(.caption).foregroundStyle(result.ok == false ? Color.red : Color.secondary) }
+                    }
                     ForEach(Array(result.fields.enumerated()),id:\.offset) { _, field in
                         Text(verbatim: field.key + "：" + field.value).modifier(MessageTextSelection())
                     }
