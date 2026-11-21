@@ -91,6 +91,9 @@ struct NativeMessageMedia: View {
                             .frame(maxWidth:.infinity,maxHeight:.infinity)
                             .clipShape(RoundedRectangle(cornerRadius:CGFloat(item.cornerRadius ?? 0)))
                     }.buttonStyle(.plain).accessibilityLabel(item.caption.isEmpty ? "打开图片" : "打开图片：" + item.caption)
+                    #if os(iOS)
+                    .modifier(PhotoPressMenu(data: image.original))
+                    #endif
                 }
             } else if let issue { Label(issue,systemImage: "photo").font(.caption).foregroundStyle(.secondary) }
             else if let size = expectedSize {
@@ -125,7 +128,7 @@ struct NativeMessageMedia: View {
                 }
                 catch { if !Task.isCancelled { issue = error.localizedDescription } }
             }
-            .sheet(isPresented: $viewing) { if let image { RasterViewer(image: image.image,title: item.caption.isEmpty ? "图片" : item.caption,animation: image.animation,animations: animations) } }
+            .sheet(isPresented: $viewing) { if let image { RasterViewer(image: image.image,title: item.caption.isEmpty ? "图片" : item.caption,animation: image.animation,animations: animations,original: image.original) } }
     }
 }
 struct MediaImage: View {

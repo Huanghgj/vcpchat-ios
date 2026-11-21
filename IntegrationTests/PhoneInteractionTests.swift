@@ -443,6 +443,13 @@ final class PhoneInteractionTests: XCTestCase {
             return keys.isSubset(of:Set(refreshed.imageSizes.keys))
         }
         try await db.removeTopic(library.id)
+        for url in urls {
+            let locator = "vchat-image://asset?" + url.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+            let photo = try XCTUnwrap(CardPhoto(hit: [locator, "离线图"]))
+            let raster = try await photo.load(owner: shownScope, stickers: .init())
+            XCTAssertEqual(raster.original, bytes, "Saving the archived image must retain its encoded bytes")
+        }
+        XCTAssertNil(CardPhoto(hit: ["file:///private/example", ""]))
         let linked=try await db.localResourceCount()
         XCTAssertEqual(linked,3,"Deleting the seed topic must not remove resources displayed by the other card")
     }

@@ -244,7 +244,7 @@ private struct PreparationContext: Equatable {
             guard reply.expires > Date(), let raster = try? await NativeMediaLoader.shared.localImage(reply.data), current()
             else { if current() { attemptedImages.insert(key) }; continue }
             memory?.rememberImage(CGSize(width:raster.width,height:raster.height),key.message,key.source)
-            let cost = raster.image.bytesPerRow * raster.image.height + (raster.animation?.count ?? 0)
+            let cost = raster.memoryCost
             if cost + images.values.reduce(0, { $0 + $1.cost }) <= 16 * 1024 * 1024 {
                 images[key] = (raster, reply.expires, cost)
             }

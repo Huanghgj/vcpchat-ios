@@ -68,6 +68,32 @@ final class MessageDisclosureTests: XCTestCase {
         tap(3); tap(4); check([4]); XCTAssertTrue(app.staticTexts["单独的结果"].exists)
         XCTAssertFalse(app.staticTexts["小雨"].exists)
     }
+    @MainActor func testSaveMarkdownAndHTMLPhotosFromChat() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        let bounds = CGRect(x: 0, y: 0, width: 180, height: 70)
+        let png = UIGraphicsImageRenderer(bounds: bounds).pngData { ctx in UIColor.orange.setFill(); ctx.fill(bounds) }
+        let src = "data:image/png;base64," + png.base64EncodedString()
+        for html in [false, true] {
+            app.launchEnvironment["VCHAT_TEST_DISCLOSURE_MESSAGE"] = html
+                ? "<div id='vcp-root'><picture><source srcset='\(src) 1x'><img alt='卡片测试图' style='display:block;width:100%' src='\(src)'></picture></div>"
+                : "![测试图片](\(src))"
+            app.launch()
+            if html {
+                let web = app.webViews.firstMatch
+                XCTAssertTrue(web.images["卡片测试图"].firstMatch.waitForExistence(timeout: 25))
+                web.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.9)
+            } else {
+                let image = app.buttons["打开图片：测试图片"].firstMatch
+                XCTAssertTrue(image.waitForExistence(timeout: 20)); image.tap()
+            }
+            let save = app.buttons["保存到照片"].firstMatch
+            XCTAssertTrue(save.waitForExistence(timeout: 15)); save.tap()
+            XCTAssertTrue(app.alerts["已保存到照片"].waitForExistence(timeout: 20))
+            app.alerts.buttons["好"].tap()
+        }
+    }
+
     @MainActor func testHomeDuringStreamThenReturnBeforeFinish() async throws {
         // Use explicit guards instead of unwinding an async XCTest via an ObjC exception.
         continueAfterFailure = true

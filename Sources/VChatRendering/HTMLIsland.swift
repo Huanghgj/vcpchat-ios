@@ -240,7 +240,7 @@ public enum HTMLIslandPolicy {
         let emphasis = emphasisColor ?? (dark ? "#88d6b0" : "#278752")
         let noMotion = motion ? "" : "*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}"
         return """
-        <!doctype html><html data-vcp-host-theme="\(color)" data-vcp-motion="\(motion ? "on" : "off")"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(media ? "https: data: vchat-image:" : "'none'"); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}body{display:flow-root}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}svg[viewBox]:not([height]){height:auto}img.vcp-standalone-photo{display:block;width:100%!important;height:auto!important;max-height:720px;object-fit:contain}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
+        <!doctype html><html data-vcp-host-theme="\(color)" data-vcp-motion="\(motion ? "on" : "off")"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src \(image); media-src \(media ? "https: data: vchat-image:" : "'none'"); font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:\(color)}html,body{background:transparent;color:CanvasText;margin:0;padding:0;font:16px -apple-system;overflow-wrap:anywhere}body{display:flow-root}#vcp-root{max-width:100%;box-sizing:border-box}img,video,svg,canvas{max-width:100%}img{-webkit-touch-callout:none}svg[viewBox]:not([height]){height:auto}img.vcp-standalone-photo{display:block;width:100%!important;height:auto!important;max-height:720px;object-fit:contain}pre{white-space:pre-wrap}:root{--vcp-md-emphasis:\(emphasis)}strong.vcp-md-strong{color:var(--vcp-md-emphasis);font-weight:700}\(noMotion)</style></head><body>\(source)</body></html>
         """
     }
 }
@@ -422,6 +422,9 @@ struct HTMLIsland: View {
     @Environment(\.transcriptRenderBuffer) private var buffer
     @State private var controller: IslandController?
     @State private var reservedHeight: CGFloat = 180
+    #if os(iOS)
+    @State private var selectedPhoto: CardPhoto?
+    #endif
     private struct Visibility: Equatable { var width:CGFloat = 0; var onScreen=false }
     @State private var layout = Visibility()
     @Environment(\.topicMediaOwner) private var owner
@@ -447,10 +450,20 @@ struct HTMLIsland: View {
     }
     var body: some View {
         Group {
-            if let controller, let view = controller.view { IslandNativeView(view: view,showActions: showMessageActions).id(ObjectIdentifier(view)).frame(height: controller.height) }
+            if let controller, let view = controller.view {
+                #if os(iOS)
+                IslandNativeView(view: view, showActions: showMessageActions, selectPhoto: options.media ? { selectedPhoto = $0 } : nil)
+                    .id(ObjectIdentifier(view)).frame(height: controller.height)
+                #else
+                IslandNativeView(view: view,showActions: showMessageActions).id(ObjectIdentifier(view)).frame(height: controller.height)
+                #endif
+            }
             else if let controller, controller.failed { Label(controller.failureMessage, systemImage: "arrow.clockwise").font(.callout).frame(height: controller.height) }
             else { Color.clear.frame(maxWidth: .infinity).frame(height: controller?.height ?? reservedHeight).accessibilityHidden(true) }
         }
+        #if os(iOS)
+        .sheet(item: $selectedPhoto) { photo in CardPhotoPreview(photo: photo, owner: owner, stickers: stickers) }
+        #endif
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onGeometryChange(for: Visibility.self,of: { [viewport] g in
             let rect=g.frame(in:.named("vcp-message-viewport"))
@@ -496,6 +509,7 @@ struct HTMLIsland: View {
 private struct IslandNativeView: UIViewRepresentable {
     var view: WKWebView
     var showActions: (@MainActor @Sendable () -> Void)?
+    var selectPhoto: (@MainActor (CardPhoto) -> Void)?
     func makeCoordinator() -> IslandPressHandler { IslandPressHandler() }
     func makeUIView(context: Context) -> UIView {
         let host = UIView(frame:view.bounds)
@@ -503,21 +517,33 @@ private struct IslandNativeView: UIViewRepresentable {
         host.addSubview(view); context.coordinator.attach(to:view)
         return host
     }
-    func updateUIView(_ host: UIView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.gesture?.isEnabled = showActions != nil }
+    func updateUIView(_ host: UIView, context: Context) { context.coordinator.showActions = showActions; context.coordinator.selectPhoto = selectPhoto
+        context.coordinator.gesture?.isEnabled = showActions != nil || selectPhoto != nil }
     static func dismantleUIView(_ host: UIView, coordinator: IslandPressHandler) {
         if let web = coordinator.gesture?.view as? WKWebView { coordinator.detach(from:web) }
     }
 }
 @MainActor private final class IslandPressHandler: NSObject, UIGestureRecognizerDelegate {
     var showActions: (@MainActor @Sendable () -> Void)?
+    var selectPhoto: (@MainActor (CardPhoto) -> Void)?
     var gesture: UILongPressGestureRecognizer?
     func attach(to view: WKWebView) {
         let press = UILongPressGestureRecognizer(target: self,action: #selector(pressed(_:)))
         press.minimumPressDuration = 0.5; press.allowableMovement = 10; press.delegate = self
         gesture = press; view.addGestureRecognizer(press)
     }
-    func detach(from view: WKWebView) { if let gesture { view.removeGestureRecognizer(gesture) }; gesture = nil; showActions = nil }
-    @objc private func pressed(_ gesture: UILongPressGestureRecognizer) { if gesture.state == .began { showActions?() } }
+    func detach(from view: WKWebView) { if let gesture { view.removeGestureRecognizer(gesture) }; gesture = nil; showActions = nil; selectPhoto = nil }
+    @objc private func pressed(_ press: UILongPressGestureRecognizer) {
+        guard press.state == .began, let web = press.view as? WKWebView else { return }
+        guard selectPhoto != nil, web.bounds.width > 0 else { showActions?(); return }
+        let location = press.location(in: web), width = web.bounds.width
+        web.__callAsyncJavaScript(CardPhoto.hitTest, arguments: ["x": location.x / width, "y": location.y / width],
+                                  inFrame: nil, in: .defaultClient) { [weak self, weak press] value, _ in
+            guard let self, let press, self.gesture === press else { return }
+            if let hit = value as? [String], let photo = CardPhoto(hit: hit) { self.selectPhoto?(photo) }
+            else { self.showActions?() }
+        }
+    }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
 }
 #else
