@@ -17,7 +17,7 @@ import VChatCore
     // endpoint, grant, IDs or message content, even for the fixture.
     static func trace(_ message: @autoclosure () -> String) {
         #if DEBUG && targetEnvironment(simulator)
-        if ProcessInfo.processInfo.environment["VCHAT_TEST_SYNC_SESSION"] != nil {
+        if UserDefaults.standard.data(forKey: SimulatorReplyFixture.key) != nil {
             let line = message()
             Logger(subsystem: "app.vcpchat.native.fixture", category: "recovery").notice("\(line, privacy: .public)")
         }

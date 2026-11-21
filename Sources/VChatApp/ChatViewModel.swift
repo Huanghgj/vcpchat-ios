@@ -3,6 +3,36 @@ import Observation
 import VChatCore
 import VChatRendering
 
+#if DEBUG && os(iOS) && targetEnvironment(simulator)
+/// The system can cold-launch the app for a URLSession event *before* XCTest
+/// opens its window. That process does not inherit XCUIApplication.launchEnvironment.
+/// Keep the synthetic loopback port and store ID together across that launch.
+struct SimulatorReplyFixture: Codable {
+    static let key = "test.reply-sync-fixture.v1"
+    let session: UUID, port: Int, expires: Date
+
+    static func resolve(_ env: [String: String]) -> (endpoint: String, session: UUID?)? {
+        let defaults = UserDefaults.standard
+        if let endpoint = env["VCHAT_TEST_LIVE_ENDPOINT"] {
+            defaults.removeObject(forKey: key)
+            guard let url = URL(string: endpoint), url.scheme == "http", url.host == "localhost",
+                  let port = url.port, (1...65535).contains(port), url.user == nil, url.password == nil else { return nil }
+            let id = env["VCHAT_TEST_SYNC_SESSION"].flatMap(UUID.init(uuidString:))
+            if let id {
+                let fixture = Self(session: id, port: port, expires: Date().addingTimeInterval(600))
+                defaults.set(try? JSONEncoder().encode(fixture), forKey: key)
+            }
+            return (endpoint, id)
+        }
+        guard env["VCHAT_TEST_DISCLOSURE_MESSAGE"] == nil, let data = defaults.data(forKey: key),
+              let saved = try? JSONDecoder().decode(Self.self, from: data), saved.expires > Date(),
+              (1...65535).contains(saved.port) else { defaults.removeObject(forKey: key); return nil }
+        if env["VCHAT_TEST_END_SYNC_SESSION"] == saved.session.uuidString { defaults.removeObject(forKey: key) }
+        return ("http://localhost:\(saved.port)", saved.session)
+    }
+}
+#endif
+
 @MainActor @Observable final class MessageViewModel: Identifiable {
     let id: String
     let topicID: String
@@ -224,10 +254,8 @@ struct TopicDraft: Codable, Sendable {
     }
     private func loadDatabase() async {
         #if DEBUG && os(iOS) && targetEnvironment(simulator)
-        if let endpoint = ProcessInfo.processInfo.environment["VCHAT_TEST_LIVE_ENDPOINT"],
-           let url = URL(string:endpoint), url.scheme == "http", url.host == "localhost" {
+        if let (endpoint, testID) = SimulatorReplyFixture.resolve(ProcessInfo.processInfo.environment) {
             do {
-                let testID=ProcessInfo.processInfo.environment["VCHAT_TEST_SYNC_SESSION"].flatMap(UUID.init(uuidString:))
                 let container = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                     appropriateFor: nil, create: true)
                 let root = container.appendingPathComponent("ReplySyncFixtures").appendingPathComponent((testID ?? UUID()).uuidString)

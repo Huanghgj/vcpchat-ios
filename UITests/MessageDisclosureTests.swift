@@ -154,6 +154,9 @@ final class MessageDisclosureTests: XCTestCase {
         let original = authors.firstMatch.identifier
         XCTAssertFalse(original.isEmpty)
         app.terminate()
+        // Model a system cold launch: no XCTest-only endpoint, DB identifier,
+        // or preference arguments will be available to a background wake.
+        app.launchEnvironment = [:]; app.launchArguments = []
         let (body,_)=try await URLSession.shared.data(from:url.appendingPathComponent("release").appendingPathComponent(id))
         XCTAssertEqual(String(decoding:body,as:UTF8.self),"1")
         app.launch()
@@ -165,7 +168,7 @@ final class MessageDisclosureTests: XCTestCase {
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format:"label == %@", "首段后台完成")).count,1)
         XCTAssertEqual(authors.count, 1)
         XCTAssertEqual(authors.firstMatch.identifier, original)
-        app.terminate(); app.launch()
+        app.terminate(); app.launchEnvironment["VCHAT_TEST_END_SYNC_SESSION"] = id; app.launch()
         XCTAssertTrue(app.staticTexts["首段后台完成"].waitForExistence(timeout: 20), "The restored reply must also be committed to disk")
         XCTAssertEqual(authors.firstMatch.identifier, original)
         let (count,_)=try await URLSession.shared.data(from:url.appendingPathComponent("count").appendingPathComponent(id))
